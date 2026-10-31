@@ -45,18 +45,28 @@ fn main() {
     };
     let root = workspace_root();
     let in_container = std::env::var_os("PIOS_IN_CONTAINER").is_some();
+    // A Linux host without docker (e.g. WSL set up by build/setup-wsl.sh)
+    // builds natively.
+    let native = native || (cfg!(target_os = "linux") && !has_docker());
     let r = if cmd == "test" {
         run(Command::new("cargo").current_dir(&root).args(["test", "--workspace", "--exclude", "xtask"]))
     } else if !in_container && !native && cmd != "help" {
         in_build_container(&root, &args)
     } else {
-        let x = Xtask { root: root.clone(), out: root.join("out"), work: root.join("work") };
+        // PIOS_WORK_DIR moves kernel sources and downloads off slow mounts
+        // such as WSL's /mnt/<drive>.
+        let work = std::env::var_os("PIOS_WORK_DIR").map(PathBuf::from).unwrap_or(root.join("work"));
+        let x = Xtask { root: root.clone(), out: root.join("out"), work };
         x.dispatch(&cmd)
     };
     if let Err(e) = r {
         eprintln!("xtask: {e}");
         std::process::exit(1);
     }
+}
+
+fn has_docker() -> bool {
+    Command::new("docker").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
@@ -258,7 +268,8 @@ impl Xtask {
         let apkroot = self.work.join("alpine-root");
         sh(&format!(
             "rm -rf '{r}' && mkdir -p '{r}' && \
-             apk.static --root '{r}' --arch {arch} --initdb --no-scripts --no-cache --no-interactive \
+             fr=; [ \"$(id -u)\" = 0 ] || fr=fakeroot; \
+             $fr apk.static --root '{r}' --arch {arch} --initdb --no-scripts --no-cache --no-interactive \
                --keys-dir /opt/apk-keys/{arch} -X {mirror}/{ver}/main add {pkgs} && \
              rm -rf '{r}/lib/apk' '{r}/etc/apk' '{r}/var' '{r}/usr/share/man' '{r}/usr/share/doc'",
             r = apkroot.display(),
