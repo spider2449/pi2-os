@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pios-core",
+    "crates/pios-init",
+    "crates/pios-supervisor",
+    "crates/pios-net",
+    "crates/pios-storage",
+    "crates/pios-tune",
+    "crates/pios-engine-api",
+    "crates/pios-engine-docker",
+    "crates/pios-engine-native",
+    "crates/pios-ctl",
+    "crates/pios",
+    "xtask",
+]
+default-members = ["crates/pios"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+pios-core = { path = "crates/pios-core" }
+pios-init = { path = "crates/pios-init" }
+pios-supervisor = { path = "crates/pios-supervisor" }
+pios-net = { path = "crates/pios-net" }
+pios-storage = { path = "crates/pios-storage" }
+pios-tune = { path = "crates/pios-tune" }
+pios-engine-api = { path = "crates/pios-engine-api" }
+pios-engine-docker = { path = "crates/pios-engine-docker" }
+pios-engine-native = { path = "crates/pios-engine-native" }
+pios-ctl = { path = "crates/pios-ctl" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+libc = "0.2"
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+# Size-oriented profile for experiments on the 1 GB board.
+[profile.release-small]
+inherits = "release"
+opt-level = "s"

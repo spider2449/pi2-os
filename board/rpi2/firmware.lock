@@ -1,0 +1,7 @@
+# GPU firmware from https://github.com/raspberrypi/firmware (boot/ directory).
+commit f2491b71ed49880cc8285e41e03f81b163c6cd59
+bootcode.bin beb5da60b58f6ef334a92801cbf033c08314fae081761e2fdc904d1a7ef457cc
+start.elf dbab350306e64a59cbe529f48a97d950baebd54c5f6c7808c8367eb3a7aa1d0a
+fixup.dat 4d9f13d0090dce21e12b8ba179218f5c214e1d7a324182e345cb10d491f50b8e
+start_cd.elf 47ef3ae4f5b250f6d91e96c7cafd6ea7fcf1b50b66b24cbf63dc281aab6f9f99
+fixup_cd.dat 3ce2dc88f51af832988e72d2179b4c5fabee95913b78be84d02eefcb3f208223

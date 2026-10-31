@@ -1,0 +1,10 @@
+[package]
+name = "pios-storage"
+description = "Data partition growth/fsck/mount, persistent bind mounts and zram swap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+libc.workspace = true

@@ -1,0 +1,23 @@
+# PiOS - Raspberry Pi 2 Model B v1.1 (BCM2836, Cortex-A7)
+arm_64bit=0
+kernel=kernel7.img
+device_tree=bcm2709-rpi-2-b.dtb
+
+# Headless: give the GPU the minimum and use the cut-down firmware.
+gpu_mem=16
+start_file=start_cd.elf
+fixup_file=fixup_cd.dat
+disable_splash=1
+boot_delay=0
+hdmi_blanking=2
+dtparam=audio=off
+
+# Serial console on GPIO14/15, 115200 8N1.
+enable_uart=1
+
+# Optional overclock (stable on most boards with a heatsink and a good PSU).
+# Uncomment all four lines together.
+#arm_freq=1000
+#core_freq=500
+#sdram_freq=500
+#over_voltage=2

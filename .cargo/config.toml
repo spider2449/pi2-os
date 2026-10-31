@@ -1,0 +1,10 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# No default build target: xtask runs on the host, the OS binary is
+# cross-compiled explicitly with --target armv7-unknown-linux-musleabihf.
+[target.armv7-unknown-linux-musleabihf]
+rustflags = [
+    "-C", "target-cpu=cortex-a7",
+    "-C", "target-feature=+crt-static",
+]

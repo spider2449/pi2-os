@@ -1,0 +1,10 @@
+[package]
+name = "pios-ctl"
+description = "Command line client for the PiOS control socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+serde_json.workspace = true

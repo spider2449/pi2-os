@@ -1,0 +1,9 @@
+[package]
+name = "pios-tune"
+description = "Kernel/runtime tuning: sysctls, CPU governor, block queue settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true

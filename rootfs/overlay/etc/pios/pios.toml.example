@@ -1,0 +1,40 @@
+# PiOS configuration. Copied to the boot partition as /boot/pios.toml.
+# Every setting is optional; the values shown are the defaults.
+
+hostname = "pios"
+log_level = "info"            # error | warn | info | debug
+console_service_logs = false  # mirror daemon output to the serial console
+
+[network]
+interface = "auto"            # "auto" = first physical NIC (eth0 on the Pi 2)
+mode = "dhcp"                 # dhcp | static
+# static_ip = { address = "192.168.1.50", prefix = 24, gateway = "192.168.1.1" }
+dns = []                      # extra resolvers, e.g. ["1.1.1.1"]
+
+[ntp]
+enabled = true
+servers = ["pool.ntp.org", "time.cloudflare.com"]
+interval_secs = 3600
+
+[storage]
+grow_data = true              # expand the data partition to the end of the card
+zram_fraction = 0.25          # compressed swap in RAM (0 disables)
+zram_algorithm = "lz4"
+
+[tune]
+cpu_governor = "performance"
+io_scheduler = "mq-deadline"
+read_ahead_kb = 512
+# [tune.sysctl]
+# "vm.swappiness" = "80"
+
+[engine]
+kind = "docker"               # docker | native (planned) | none
+wait_time_sync = true         # start dockerd only after the clock is valid
+tls_tcp = true                # tcp://:2376 with mTLS if /boot/docker-tls/*.pem exist
+max_concurrent_downloads = 2
+log_max_size = "10m"
+log_max_file = 3
+# daemon_memory_max = "256M"  # cgroup cap for containerd + dockerd
+# [engine.extra]              # merged verbatim into daemon.json
+# "registry-mirrors" = ["https://mirror.example.com"]

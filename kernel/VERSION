@@ -1,0 +1,5 @@
+# Raspberry Pi kernel tree: branch and pinned commit.
+repo=https://github.com/raspberrypi/linux
+branch=rpi-6.18.y
+commit=b3495ea401d709af0701a85babcba5e3d788a602
+defconfig=bcm2709_defconfig

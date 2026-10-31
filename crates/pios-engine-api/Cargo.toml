@@ -1,0 +1,9 @@
+[package]
+name = "pios-engine-api"
+description = "Pluggable container engine interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true

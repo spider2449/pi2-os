@@ -1,0 +1,15 @@
+[package]
+name = "pios-init"
+description = "PID 1: early mounts, boot sequence, supervisor hand-off and clean shutdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+pios-supervisor.workspace = true
+pios-net.workspace = true
+pios-storage.workspace = true
+pios-tune.workspace = true
+pios-engine-api.workspace = true
+libc.workspace = true

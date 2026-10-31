@@ -1,0 +1,10 @@
+[package]
+name = "pios-engine-native"
+description = "Rust-native container engine (youki based) - planned"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+pios-engine-api.workspace = true

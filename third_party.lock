@@ -1,0 +1,16 @@
+# Pinned third-party inputs. xtask verifies every download against sha256.
+
+[docker]
+version = "29.9.2"
+url = "https://download.docker.com/linux/static/stable/armhf/docker-29.9.2.tgz"
+sha256 = "7b911fe928d628e4eb6af8714d9ac8ad38b450649b05f3966e54994e6d25f21b"
+# The docker CLI and ctr are left out: the board is managed remotely.
+binaries = ["dockerd", "containerd", "containerd-shim-runc-v2", "runc", "docker-init", "docker-proxy"]
+
+[alpine]
+# Userland helpers dockerd and pios-storage shell out to. apk verifies
+# package signatures with the Alpine keys baked into the build container.
+version = "v3.24"
+mirror = "https://dl-cdn.alpinelinux.org/alpine"
+arch = "armv7"
+packages = ["iptables", "ip6tables", "e2fsprogs", "e2fsprogs-extra", "ca-certificates-bundle"]

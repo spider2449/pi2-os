@@ -1,0 +1,11 @@
+[package]
+name = "pios-supervisor"
+description = "Dependency-ordered process supervisor with cgroup v2 isolation and control socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+serde_json.workspace = true
+libc.workspace = true

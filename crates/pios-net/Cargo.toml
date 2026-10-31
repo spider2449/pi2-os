@@ -1,0 +1,10 @@
+[package]
+name = "pios-net"
+description = "Network bring-up: loopback, DHCPv4 client, static addressing, resolver, SNTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pios-core.workspace = true
+libc.workspace = true

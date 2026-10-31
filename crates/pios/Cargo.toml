@@ -1,0 +1,24 @@
+[package]
+name = "pios"
+description = "PiOS multi-call binary: init, netd, ntpd, pios-ctl, engine helpers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["engine-docker"]
+engine-docker = ["dep:pios-engine-docker"]
+engine-native = ["dep:pios-engine-native"]
+# mimalloc beats musl's allocator by a wide margin; needs a C cross compiler
+# (provided by zig in the build container).
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+pios-core.workspace = true
+pios-init.workspace = true
+pios-net.workspace = true
+pios-ctl.workspace = true
+pios-engine-api.workspace = true
+pios-engine-docker = { workspace = true, optional = true }
+pios-engine-native = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
