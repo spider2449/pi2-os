@@ -66,6 +66,30 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
    docker --context pi run --rm hello-world
    ```
 
+### 換新 SD 卡重裝
+
+只換 rootfs/kernel 用下面的 A/B 更新即可；整張卡重燒時，p4（容器、image、volume、SSH host key）會從空的開始。
+
+1. **備份 volume**（舊卡還在跑時）。native 引擎沒有 `docker cp`，用 tar 經 docker context 串流：
+
+   ```sh
+   docker --context pi volume ls
+   docker --context pi compose -f examples/gitea/compose.yaml stop
+   docker --context pi run --rm -v gitea_data:/data alpine tar -C /data -cf - . > gitea-backup.tar
+   ```
+
+2. **確認設定**：在板子上直接改過的 `/boot/pios.toml` 不會回寫，要同步到 `board/rpi2/pios.local.toml`（例如 `[engine] kind = "native"`、靜態 IP、`[ssh] enabled = true`）。`out/certs/` 留著（gitignored），映像會帶同一組伺服器憑證，現有的 `docker context pi` 不用改；不要重跑 `cargo xtask certs`，除非憑證遺失。
+3. `cargo xtask all`，把 `out/images/pios.img` 燒到新卡（Raspberry Pi Imager → Use custom），開機等 `pios: engine ready`。
+4. SSH host key 是新的，先清掉舊紀錄：`ssh-keygen -R pios; ssh-keygen -R 192.168.1.50`。
+5. **還原 volume** 再啟動：
+
+   ```sh
+   docker --context pi run --rm -i -v gitea_data:/data alpine tar -C /data -xf - < gitea-backup.tar
+   docker --context pi compose -f examples/gitea/compose.yaml up -d
+   ```
+
+確認新卡正常之前，舊卡先留著當退路。
+
 ## 管理管道
 
 | 管道 | 埠 | 說明 |
