@@ -8,6 +8,7 @@ use pios_core::{error, info, paths, warn, Error, Result};
 use pios_engine_api::EngineContext;
 use pios_supervisor::{Exit, Supervisor};
 
+use crate::shell;
 use crate::status::{self, Led};
 use crate::{cmdline_value, engine_dependencies, system_services, EngineSelector, DEFAULT_BOOT_DEVICE};
 
@@ -53,6 +54,9 @@ fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
         warn!("init", "zram: {e}");
     }
     pios_tune::apply(&cfg.tune, &cfg.storage);
+    if let Err(e) = shell::prepare_ssh(&cfg.ssh) {
+        warn!("init", "ssh: {e}");
+    }
 
     let mut services = system_services(&cfg);
     let mut milestone = None;

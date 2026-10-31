@@ -27,6 +27,22 @@ pub fn system_services(cfg: &PiosConfig) -> Vec<ServiceSpec> {
         NetworkMode::Static => netd.ready(ReadyCheck::Exited).restart(RestartPolicy::OnFailure),
         NetworkMode::Dhcp => netd.ready(ReadyCheck::PathExists(pios_core::paths::NET_READY.into())),
     });
+    if cfg.remote.enabled {
+        // Independent of the engine on purpose: the rescue path when it is down.
+        // Exits 0 without certificates, which marks it done.
+        v.push(ServiceSpec::new("ctld", &[bin, "ctld"]).after(&["netd"]).restart(RestartPolicy::OnFailure));
+    }
+    if cfg.ssh.enabled {
+        let port = cfg.ssh.port.to_string();
+        v.push(
+            // -F foreground, -E log to stderr, -s/-g no password logins at all.
+            ServiceSpec::new(
+                "sshd",
+                &["/usr/sbin/dropbear", "-F", "-E", "-s", "-g", "-p", &port, "-r", pios_core::paths::SSH_HOST_KEY],
+            )
+            .after(&["netd"]),
+        );
+    }
     if cfg.ntp.enabled {
         v.push(
             ServiceSpec::new("ntpd", &[bin, "ntpd"])
@@ -51,6 +67,8 @@ mod boot;
 #[cfg(target_os = "linux")]
 mod status;
 #[cfg(target_os = "linux")]
+mod shell;
+#[cfg(target_os = "linux")]
 pub use boot::run;
 
 #[cfg(test)]
@@ -74,7 +92,28 @@ mod tests {
         .unwrap();
         let s = system_services(&cfg);
         assert_eq!(s[0].ready, ReadyCheck::Exited);
-        assert_eq!(s[1].after, vec!["netd"]);
+        assert!(s[1..].iter().all(|x| x.after == vec!["netd"]));
+    }
+
+    #[test]
+    fn ssh_is_opt_in_and_key_only() {
+        assert!(!system_services(&PiosConfig::default()).iter().any(|x| x.name == "sshd"));
+        let cfg = PiosConfig::parse("[ssh]\nenabled = true\nport = 2222").unwrap();
+        let s = system_services(&cfg);
+        let sshd = s.iter().find(|x| x.name == "sshd").unwrap();
+        assert!(sshd.exec.contains(&"-s".to_string()) && sshd.exec.contains(&"-g".to_string()));
+        assert!(sshd.exec.windows(2).any(|w| w == ["-p", "2222"]));
+        assert_eq!(sshd.after, vec!["netd"]);
+    }
+
+    #[test]
+    fn remote_management_is_independent_of_engine() {
+        let s = system_services(&PiosConfig::default());
+        let ctld = s.iter().find(|x| x.name == "ctld").unwrap();
+        assert_eq!(ctld.after, vec!["netd"]);
+        let mut cfg = PiosConfig::default();
+        cfg.remote.enabled = false;
+        assert!(!system_services(&cfg).iter().any(|x| x.name == "ctld"));
     }
 
     #[test]

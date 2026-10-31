@@ -13,4 +13,7 @@ binaries = ["dockerd", "containerd", "containerd-shim-runc-v2", "runc", "docker-
 version = "v3.24"
 mirror = "https://dl-cdn.alpinelinux.org/alpine"
 arch = "armv7"
-packages = ["iptables", "ip6tables", "e2fsprogs", "e2fsprogs-extra", "ca-certificates-bundle"]
+repositories = ["main", "community"]
+# dropbear, scp and sftp-server back the optional [ssh] service.
+packages = ["iptables", "ip6tables", "e2fsprogs", "e2fsprogs-extra", "ca-certificates-bundle",
+            "dropbear", "dropbear-scp", "openssh-sftp-server"]

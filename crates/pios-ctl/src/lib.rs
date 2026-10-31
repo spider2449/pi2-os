@@ -1,4 +1,8 @@
-//! `pios-ctl`: talks to PID 1 over the control socket.
+//! `pios-ctl`: talks to PID 1 over the control socket. `server` relays the
+//! same protocol over mutual TLS for remote management.
+
+#[cfg(target_os = "linux")]
+pub mod server;
 
 use pios_core::ipc::{Request, Response};
 
@@ -73,7 +77,8 @@ pub fn main(args: &[String]) -> i32 {
     })();
     match result {
         Ok(resp) => {
-            print!("{}", render(&resp, show_mem, &rss_kib));
+            // Not print!: a closed pipe (pios-ctl status | head) must not panic.
+            let _ = std::io::stdout().write_all(render(&resp, show_mem, &rss_kib).as_bytes());
             i32::from(matches!(resp, Response::Error { .. }))
         }
         Err(e) => {

@@ -45,9 +45,10 @@ fn main() {
     };
     let root = workspace_root();
     let in_container = std::env::var_os("PIOS_IN_CONTAINER").is_some();
-    // A Linux host without docker (e.g. WSL set up by build/setup-wsl.sh)
-    // builds natively.
-    let native = native || (cfg!(target_os = "linux") && !has_docker());
+    // A Linux host with the native toolchain (build/setup-wsl.sh) builds
+    // natively. Deciding by "is docker installed" is wrong: the CLI may point
+    // at a remote engine such as the Pi itself.
+    let native = native || (cfg!(target_os = "linux") && (has_native_toolchain() || !has_docker()));
     let r = if cmd == "test" {
         run(Command::new("cargo").current_dir(&root).args(["test", "--workspace", "--exclude", "xtask"]))
     } else if !in_container && !native && cmd != "help" {
@@ -63,6 +64,13 @@ fn main() {
         eprintln!("xtask: {e}");
         std::process::exit(1);
     }
+}
+
+fn has_native_toolchain() -> bool {
+    std::env::var_os("PIOS_NATIVE").is_some()
+        || ["apk.static", "cargo-zigbuild", "genimage"].iter().all(|t| {
+            Command::new("sh").args(["-c", &format!("command -v {t}")]).output().is_ok_and(|o| o.status.success())
+        })
 }
 
 fn has_docker() -> bool {
@@ -124,6 +132,7 @@ struct AlpineLock {
     version: String,
     mirror: String,
     arch: String,
+    repositories: Vec<String>,
     packages: Vec<String>,
 }
 
@@ -277,12 +286,11 @@ impl Xtask {
             "rm -rf '{r}' && mkdir -p '{r}' && \
              um=; [ \"$(id -u)\" = 0 ] || um=--usermode; \
              apk.static $um --root '{r}' --arch {arch} --initdb --no-scripts --no-cache --no-interactive \
-               --keys-dir /opt/apk-keys/{arch} -X {mirror}/{ver}/main add {pkgs} && \
+               --keys-dir /opt/apk-keys/{arch} {repos} add {pkgs} && \
              rm -rf '{r}/lib/apk' '{r}/etc/apk' '{r}/var' '{r}/usr/share/man' '{r}/usr/share/doc'",
             r = apkroot.display(),
             arch = a.arch,
-            mirror = a.mirror,
-            ver = a.version,
+            repos = a.repositories.iter().map(|r| format!("-X {}/{}/{r}", a.mirror, a.version)).collect::<Vec<_>>().join(" "),
             pkgs = a.packages.join(" "),
         ))
     }
@@ -292,16 +300,22 @@ impl Xtask {
         sh(&format!(
             r#"
             d='{d}'; mkdir -p "$d/server" "$d/client"; cd "$d"
-            [ -f ca-key.pem ] || openssl genrsa -out ca-key.pem 4096
-            [ -f ca.pem ] || openssl req -new -x509 -days 3650 -key ca-key.pem -sha256 -subj "/CN=pios-ca" -out ca.pem
-            openssl genrsa -out server/server-key.pem 2048
+            # Ed25519 everywhere: an RSA-2048 handshake costs dockerd ~230 ms of
+            # CPU on the Cortex-A7 (Go has no 32-bit ARM RSA assembly).
+            # An older RSA CA is replaced, which invalidates its old certs.
+            if [ -f ca-key.pem ] && ! openssl pkey -in ca-key.pem -noout -text | grep -q ED25519; then
+              echo "replacing RSA CA with Ed25519"; rm -f ca-key.pem ca.pem ca.srl
+            fi
+            [ -f ca-key.pem ] || openssl genpkey -algorithm ed25519 -out ca-key.pem
+            [ -f ca.pem ] || openssl req -new -x509 -days 3650 -key ca-key.pem -subj "/CN=pios-ca" -out ca.pem
+            openssl genpkey -algorithm ed25519 -out server/server-key.pem
             openssl req -new -key server/server-key.pem -subj "/CN=pios" -out server.csr
             printf 'subjectAltName=DNS:pios,DNS:pios.local,DNS:localhost,IP:127.0.0.1%s\nextendedKeyUsage=serverAuth\n' "${{PIOS_CERT_SAN:+,$PIOS_CERT_SAN}}" > server.ext
-            openssl x509 -req -days 3650 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out server/server-cert.pem -extfile server.ext
-            openssl genrsa -out client/key.pem 2048
+            openssl x509 -req -days 3650 -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out server/server-cert.pem -extfile server.ext
+            openssl genpkey -algorithm ed25519 -out client/key.pem
             openssl req -new -key client/key.pem -subj "/CN=client" -out client.csr
             echo extendedKeyUsage=clientAuth > client.ext
-            openssl x509 -req -days 3650 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out client/cert.pem -extfile client.ext
+            openssl x509 -req -days 3650 -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out client/cert.pem -extfile client.ext
             cp ca.pem server/ca.pem; cp ca.pem client/ca.pem
             rm -f *.csr *.ext
             echo "server certs: $d/server (copied to the boot partition by 'image')"
@@ -324,14 +338,21 @@ impl Xtask {
             r='{r}'; rm -rf "$r"; mkdir -p "$r"
             cp -a '{alpine}/.' "$r/"
             cd "$r"
-            mkdir -p boot data dev proc sys run tmp var etc sbin usr/bin usr/sbin root
+            mkdir -p boot data dev proc sys run tmp var etc sbin usr/bin usr/sbin
+            ln -sfn /run/pios/root root   # root home lives on tmpfs (read-only rootfs)
             install -m 0755 '{bin}' sbin/pios
             ln -sf pios sbin/init; ln -sf pios sbin/pios-ctl; ln -sf ../../sbin/pios usr/bin/pios-ctl
             install -m 0755 {docker_bins} usr/bin/
+            # busybox applet links (apk ran without scripts, so its trigger never
+            # created them). Real binaries from other packages take precedence.
+            while read -r p; do
+              [ -e "$p" ] || [ -L "$p" ] || {{ mkdir -p "$(dirname "$p")"; ln -s /bin/busybox "$p"; }}
+            done < '{applets}'
             cp -a '{overlay}/.' "$r/"
             ln -sf /run/pios/resolv.conf etc/resolv.conf
             ln -sf /proc/self/mounts etc/mtab
-            printf 'root:x:0:0:root:/root:/sbin/nologin\n' > etc/passwd
+            printf 'root:x:0:0:root:/root:/bin/sh\n' > etc/passwd
+            printf '/bin/sh\n' > etc/shells
             printf 'root:x:0:\ndocker:x:999:\n' > etc/group
             printf 'NAME=PiOS\nID=pios\nVERSION_ID=%s\nPRETTY_NAME="PiOS %s (Docker %s)"\n' '{ver}' '{ver}' '{dver}' > etc/os-release
             mksquashfs "$r" '{out}/rootfs.squashfs' -noappend -all-root -comp lz4 -Xhc -b 256K -quiet
@@ -342,6 +363,7 @@ impl Xtask {
             bin = bin.display(),
             docker_bins = docker_bins.join(" "),
             overlay = self.p("rootfs/overlay"),
+            applets = self.p("rootfs/busybox-applets.txt"),
             ver = env!("CARGO_PKG_VERSION"),
             dver = lock.docker.version,
             out = self.out.display(),
@@ -362,7 +384,11 @@ impl Xtask {
             cp '{out}'/firmware/* "$b/"
             cp '{out}/kernel/kernel7.img' '{out}/kernel/bcm2709-rpi-2-b.dtb' "$b/"
             cp '{board}/config.txt' '{board}/cmdline.txt' "$b/"
-            cp '{overlay}/etc/pios/pios.toml.example' "$b/pios.toml"
+            # Board-specific settings (gitignored) win over the shipped example.
+            if [ -f '{board}/pios.local.toml' ]; then cp '{board}/pios.local.toml' "$b/pios.toml"
+            else cp '{overlay}/etc/pios/pios.toml.example' "$b/pios.toml"; fi
+            # SSH public keys (gitignored), used when [ssh] is enabled.
+            if [ -f '{board}/authorized_keys' ]; then cp '{board}/authorized_keys' "$b/authorized_keys"; fi
             if [ -d '{out}/certs/server' ]; then mkdir -p "$b/docker-tls"; cp '{out}'/certs/server/*.pem "$b/docker-tls/"; fi
             rm -f "$i/boot.vfat"; mkfs.vfat -F 32 -n PIOS-BOOT -C "$i/boot.vfat" $(({boot_mib} * 1024)) >/dev/null
             mcopy -s -i "$i/boot.vfat" "$b"/* ::/
@@ -396,14 +422,18 @@ impl Xtask {
             i='{images}'
             cp "$i/pios.img" "$i/pios-qemu.img"
             truncate -s 2G "$i/pios-qemu.img"   # SD size must be a power of two
+            # QEMU user networking cannot use a board-specific static IP.
+            mcopy -o -i "$i/pios-qemu.img@@4M" '{example}' ::pios.toml
             exec qemu-system-arm -M raspi2b -m 1G -nographic \
               -kernel '{out}/kernel/kernel7.img' -dtb '{out}/kernel/bcm2709-rpi-2-b.dtb' \
               -drive file="$i/pios-qemu.img",if=sd,format=raw \
               -append '{cmdline}' \
-              -usb -device usb-net,netdev=n0 -netdev user,id=n0,hostfwd=tcp::2376-:2376
+              -usb -device usb-net,netdev=n0 \
+              -netdev user,id=n0,hostfwd=tcp::2376-:2376,hostfwd=tcp::2377-:2377
             "#,
             images = images.display(),
             out = self.out.display(),
+            example = self.p("rootfs/overlay/etc/pios/pios.toml.example"),
         ))
     }
 }

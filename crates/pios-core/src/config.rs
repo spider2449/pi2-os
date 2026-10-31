@@ -21,6 +21,8 @@ pub struct PiosConfig {
     pub storage: StorageConfig,
     pub tune: TuneConfig,
     pub engine: EngineConfig,
+    pub remote: RemoteConfig,
+    pub ssh: SshConfig,
 }
 
 impl Default for PiosConfig {
@@ -34,6 +36,8 @@ impl Default for PiosConfig {
             storage: StorageConfig::default(),
             tune: TuneConfig::default(),
             engine: EngineConfig::default(),
+            remote: RemoteConfig::default(),
+            ssh: SshConfig::default(),
         }
     }
 }
@@ -219,6 +223,10 @@ pub struct EngineConfig {
     pub wait_time_sync: bool,
     /// Expose the engine API on TCP 2376 with mutual TLS when certificates exist.
     pub tls_tcp: bool,
+    /// Default OCI runtime. "runc" is built in; any other name is registered
+    /// from /usr/bin/<name> (crun was evaluated and rejected: slower on this
+    /// board and it ignored --pid=host).
+    pub runtime: String,
     pub max_concurrent_downloads: u32,
     pub log_max_size: String,
     pub log_max_file: u32,
@@ -234,12 +242,45 @@ impl Default for EngineConfig {
             kind: EngineKind::Docker,
             wait_time_sync: true,
             tls_tcp: true,
+            runtime: "runc".into(),
             max_concurrent_downloads: 2,
             log_max_size: "10m".into(),
             log_max_file: 3,
             daemon_memory_max: None,
             extra: BTreeMap::new(),
         }
+    }
+}
+
+/// Remote management: the pios-ctl protocol over mutual TLS, independent of
+/// the container engine so the board stays manageable if dockerd is down.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// Serve when the certificates in /boot/docker-tls exist.
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self { enabled: true, port: 2377 }
+    }
+}
+
+/// Optional SSH server (dropbear), key authentication only.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SshConfig {
+    /// Off by default: one less daemon and attack surface. Needs
+    /// /boot/authorized_keys to be useful.
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self { enabled: false, port: 22 }
     }
 }
 

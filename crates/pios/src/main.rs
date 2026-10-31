@@ -20,6 +20,7 @@ fn main() {
         "ctl" => pios_ctl::main(rest),
         "netd" => daemon("netd", pios_net::netd::run),
         "ntpd" => daemon("ntpd", pios_net::ntpd::run),
+        "ctld" => daemon("ctld", pios_ctl::server::run),
         #[cfg(feature = "engine-docker")]
         "engine-stop" => report("engine", pios_engine_docker::api::stop_all_containers()),
         "version" => {
@@ -27,7 +28,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: pios <init|netd|ntpd|ctl|engine-stop|version>");
+            eprintln!("usage: pios <init|netd|ntpd|ctld|ctl|engine-stop|version>");
             2
         }
     });

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Remote PiOS management over mutual TLS (works even when dockerd is down).
+#
+#   tools/pios-remote [-H host[:port]] <status|logs SVC|start SVC|stop SVC|restart SVC|reboot|poweroff>
+#
+# Certificates default to ~/.docker/pios (ca.pem, cert.pem, key.pem), the
+# same client certificates used for the docker context.
+set -euo pipefail
+
+host="${PIOS_HOST:-pios}"
+certs="${PIOS_CERTS:-$HOME/.docker/pios}"
+if [ "${1:-}" = "-H" ]; then host="$2"; shift 2; fi
+[[ "$host" == *:* ]] || host="$host:2377"
+
+cmd="${1:-}"; svc="${2:-}"
+case "$cmd" in
+    status|reboot|poweroff) req="{\"cmd\":\"$cmd\"}" ;;
+    logs|start|stop|restart)
+        [ -n "$svc" ] || { echo "usage: $0 $cmd SERVICE" >&2; exit 2; }
+        req="{\"cmd\":\"$cmd\",\"service\":\"$svc\"}" ;;
+    *) sed -n '2,8p' "$0" >&2; exit 2 ;;
+esac
+
+resp=$(printf '%s\n' "$req" | openssl s_client -quiet -verify_return_error \
+    -connect "$host" -servername "${host%%:*}" -verify_hostname "${host%%:*}" \
+    -CAfile "$certs/ca.pem" -cert "$certs/cert.pem" -key "$certs/key.pem" 2>/dev/null)
+
+# Pretty-print without extra dependencies: python3 when present, raw JSON otherwise.
+if command -v python3 >/dev/null; then
+    printf '%s' "$resp" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+k = r.get("kind")
+if k == "status":
+    u = r["uptime_secs"]
+    print("uptime %dh%02dm" % (u // 3600, u // 60 % 60))
+    row = "%-14s %-9s %7s %8s"
+    print(row % ("SERVICE", "STATE", "PID", "RESTARTS"))
+    for s in r["services"]:
+        print(row % (s["name"], s["state"], s["pid"] or "-", s["restarts"]))
+elif k == "logs":
+    sys.stdout.write(r["text"])
+elif k == "error":
+    print("error:", r["message"]); sys.exit(1)
+else:
+    print("ok")'
+else
+    printf '%s\n' "$resp"
+fi

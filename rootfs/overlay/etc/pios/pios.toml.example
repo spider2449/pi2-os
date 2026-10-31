@@ -32,9 +32,18 @@ read_ahead_kb = 512
 kind = "docker"               # docker | native (planned) | none
 wait_time_sync = true         # start dockerd only after the clock is valid
 tls_tcp = true                # tcp://:2376 with mTLS if /boot/docker-tls/*.pem exist
+runtime = "runc"              # OCI runtime; others are registered from /usr/bin/<name>
 max_concurrent_downloads = 2
 log_max_size = "10m"
 log_max_file = 3
 # daemon_memory_max = "256M"  # cgroup cap for containerd + dockerd
 # [engine.extra]              # merged verbatim into daemon.json
 # "registry-mirrors" = ["https://mirror.example.com"]
+
+[remote]
+enabled = true                # pios-ctl over mTLS on this port (same certs as docker)
+port = 2377
+
+[ssh]
+enabled = false               # dropbear, keys only: put public keys in /boot/authorized_keys
+port = 22

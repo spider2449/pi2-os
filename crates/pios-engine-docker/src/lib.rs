@@ -74,8 +74,6 @@ impl ContainerEngine for DockerEngine {
         .ready(ReadyCheck::PathExists(CONTAINERD_SOCKET.into()))
         .restart(RestartPolicy::Always)
         .limits(limits.clone())
-        // Go runtime: return memory to the OS eagerly, we only have 1 GB.
-        .env("GOGC", "50")
         .stop_timeout(Duration::from_secs(15));
 
         let daemon_json = Self::daemon_json_path(ctx);
@@ -93,7 +91,6 @@ impl ContainerEngine for DockerEngine {
         .ready(ReadyCheck::HttpUnix { socket: DOCKER_SOCKET.into(), path: "/_ping".into() })
         .restart(RestartPolicy::Always)
         .limits(limits)
-        .env("GOGC", "50")
         .shutdown_hook(&[paths::PIOS_BIN, "engine-stop"])
         .stop_timeout(Duration::from_secs(30));
 
@@ -131,6 +128,12 @@ pub fn daemon_json(cfg: &EngineConfig, tls_dir: Option<&Path>) -> Value {
     m.insert("default-ulimits".into(), json!({ "nofile": { "Name": "nofile", "Soft": 65536, "Hard": 65536 } }));
     m.insert("iptables".into(), json!(true));
     m.insert("ip-forward".into(), json!(true));
+    // runc is built into dockerd's runtime list; anything else is registered
+    // from /usr/bin and made the default.
+    if cfg.runtime != "runc" {
+        m.insert("runtimes".into(), json!({ &cfg.runtime: { "path": format!("/usr/bin/{}", cfg.runtime) } }));
+        m.insert("default-runtime".into(), json!(cfg.runtime));
+    }
     if let Some(dir) = tls_dir {
         hosts.push(json!("tcp://0.0.0.0:2376"));
         m.insert("tls".into(), json!(true));
@@ -169,6 +172,16 @@ mod tests {
         assert_eq!(v["userland-proxy"], false);
         assert_eq!(v["hosts"], json!(["unix:///var/run/docker.sock"]));
         assert!(v.get("tlsverify").is_none());
+        // Default runc is built into dockerd and needs no registration.
+        assert!(v.get("runtimes").is_none() && v.get("default-runtime").is_none());
+    }
+
+    #[test]
+    fn other_runtimes_are_registered_from_usr_bin() {
+        let cfg = EngineConfig { runtime: "youki".into(), ..EngineConfig::default() };
+        let v = daemon_json(&cfg, None);
+        assert_eq!(v["default-runtime"], "youki");
+        assert_eq!(v["runtimes"]["youki"]["path"], "/usr/bin/youki");
     }
 
     #[test]

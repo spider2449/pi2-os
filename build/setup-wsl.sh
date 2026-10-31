@@ -50,7 +50,7 @@ sudo mkdir -p /opt/apk-keys
 sudo cp -a "$tmp/alpine-keys/usr/share/apk/keys/." /opt/apk-keys/
 
 echo "==> environment"
-profile_line='export PIOS_WORK_DIR="$HOME/.cache/pios/work" CARGO_TARGET_DIR="$HOME/.cache/pios/target"'
+profile_line='export PIOS_NATIVE=1 PIOS_WORK_DIR="$HOME/.cache/pios/work" CARGO_TARGET_DIR="$HOME/.cache/pios/target"'
 grep -qxF "$profile_line" "$HOME/.profile" || echo "$profile_line" >> "$HOME/.profile"
 mkdir -p "$HOME/.cache/pios/work" "$HOME/.cache/pios/target"
 
