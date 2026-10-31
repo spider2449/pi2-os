@@ -96,7 +96,7 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 |---|---|---|
 | Docker API | 2376 | mTLS（Ed25519） |
 | `tools/pios-remote` | 2377 | `status` / `logs` / `restart` / `reboot`；經 `ctld` 轉給 PID 1，**dockerd 掛掉也能用** |
-| SSH（dropbear，選用） | 22 | 只允許金鑰登入；`[ssh] enabled = true` |
+| SSH（dropbear，選用） | 22 | `[ssh] enabled = true`；預設只允許金鑰，設 `password_hash`（`openssl passwd -6` 產生）後 root 也能用密碼登入 |
 | HDMI console / `pios-boot.log` / ACT LED | — | 開機與錯誤診斷，不需要網路 |
 
 ### 系統更新（A/B，不需重燒 SD 卡）

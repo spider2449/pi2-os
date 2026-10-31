@@ -357,6 +357,7 @@ impl Xtask {
             cp -a '{overlay}/.' "$r/"
             ln -sf /run/pios/resolv.conf etc/resolv.conf
             ln -sf /proc/self/mounts etc/mtab
+            ln -sf /run/pios/shadow etc/shadow   # written by init from [ssh] password_hash
             printf 'root:x:0:0:root:/root:/bin/sh\n' > etc/passwd
             printf '/bin/sh\n' > etc/shells
             printf 'root:x:0:\ndocker:x:999:\n' > etc/group

@@ -75,6 +75,15 @@ impl PiosConfig {
         if !(0.0..=1.0).contains(&self.storage.zram_fraction) {
             return Err(Error::Config("storage.zram_fraction must be within 0.0..=1.0".into()));
         }
+        if let Some(h) = &self.ssh.password_hash {
+            // Only crypt hashes ($id$salt$hash): a plain-text password would
+            // silently never match, and ':' or newlines would corrupt /etc/shadow.
+            if !h.starts_with('$') || h.len() < 8 || h.contains([':', '\n', '\r']) {
+                return Err(Error::Config(
+                    "ssh.password_hash must be a crypt hash such as $6$... (openssl passwd -6)".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -268,19 +277,23 @@ impl Default for RemoteConfig {
     }
 }
 
-/// Optional SSH server (dropbear), key authentication only.
+/// Optional SSH server (dropbear). Public keys always work; root password
+/// logins are allowed only when a password hash is configured.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshConfig {
     /// Off by default: one less daemon and attack surface. Needs
-    /// /boot/authorized_keys to be useful.
+    /// /boot/authorized_keys or `password_hash` to be useful.
     pub enabled: bool,
     pub port: u16,
+    /// crypt(3) hash of root's password (`openssl passwd -6`, or busybox
+    /// `mkpasswd -m sha512`). Unset = key-only logins.
+    pub password_hash: Option<String>,
 }
 
 impl Default for SshConfig {
     fn default() -> Self {
-        Self { enabled: false, port: 22 }
+        Self { enabled: false, port: 22, password_hash: None }
     }
 }
 
@@ -330,6 +343,14 @@ mod tests {
     #[test]
     fn static_mode_requires_address() {
         assert!(PiosConfig::parse("[network]\nmode = \"static\"").is_err());
+    }
+
+    #[test]
+    fn ssh_password_hash_must_be_a_crypt_hash() {
+        assert!(PiosConfig::parse("[ssh]\npassword_hash = \"hunter2\"").is_err());
+        assert!(PiosConfig::parse("[ssh]\npassword_hash = \"$6$salt$a:b\"").is_err());
+        let cfg = PiosConfig::parse("[ssh]\npassword_hash = \"$6$salt$hashhash\"").unwrap();
+        assert_eq!(cfg.ssh.password_hash.as_deref(), Some("$6$salt$hashhash"));
     }
 
     #[test]

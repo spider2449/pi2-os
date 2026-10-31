@@ -27,3 +27,6 @@ pub const TLS_DIR: &str = "/boot/docker-tls";
 pub const AUTHORIZED_KEYS: &str = "/boot/authorized_keys";
 pub const SSH_HOST_KEY: &str = "/var/lib/pios/ssh/dropbear_ed25519_host_key";
 pub const ROOT_HOME: &str = "/run/pios/root";
+/// Generated shadow file (/etc/shadow links here): root's password hash from
+/// `[ssh] password_hash`, or a locked entry.
+pub const SHADOW: &str = "/run/pios/shadow";

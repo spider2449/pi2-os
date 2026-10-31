@@ -34,14 +34,14 @@ pub fn system_services(cfg: &PiosConfig) -> Vec<ServiceSpec> {
     }
     if cfg.ssh.enabled {
         let port = cfg.ssh.port.to_string();
-        v.push(
-            // -F foreground, -E log to stderr, -s/-g no password logins at all.
-            ServiceSpec::new(
-                "sshd",
-                &["/usr/sbin/dropbear", "-F", "-E", "-s", "-g", "-p", &port, "-r", pios_core::paths::SSH_HOST_KEY],
-            )
-            .after(&["netd"]),
-        );
+        // -F foreground, -E log to stderr; -s/-g forbid password logins
+        // unless a root password hash is configured.
+        let mut exec = vec!["/usr/sbin/dropbear", "-F", "-E"];
+        if cfg.ssh.password_hash.is_none() {
+            exec.extend(["-s", "-g"]);
+        }
+        exec.extend(["-p", &port, "-r", pios_core::paths::SSH_HOST_KEY]);
+        v.push(ServiceSpec::new("sshd", &exec).after(&["netd"]));
     }
     if cfg.ntp.enabled {
         v.push(
@@ -104,6 +104,14 @@ mod tests {
         assert!(sshd.exec.contains(&"-s".to_string()) && sshd.exec.contains(&"-g".to_string()));
         assert!(sshd.exec.windows(2).any(|w| w == ["-p", "2222"]));
         assert_eq!(sshd.after, vec!["netd"]);
+    }
+
+    #[test]
+    fn ssh_password_logins_need_a_hash() {
+        let cfg = PiosConfig::parse("[ssh]\nenabled = true\npassword_hash = \"$6$salt$hashhash\"").unwrap();
+        let s = system_services(&cfg);
+        let sshd = s.iter().find(|x| x.name == "sshd").unwrap();
+        assert!(!sshd.exec.contains(&"-s".to_string()) && !sshd.exec.contains(&"-g".to_string()));
     }
 
     #[test]

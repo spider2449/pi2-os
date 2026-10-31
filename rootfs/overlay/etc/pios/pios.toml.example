@@ -45,5 +45,6 @@ enabled = true                # pios-ctl over mTLS on this port (same certs as d
 port = 2377
 
 [ssh]
-enabled = false               # dropbear, keys only: put public keys in /boot/authorized_keys
+enabled = false               # dropbear; public keys go in /boot/authorized_keys
 port = 22
+# password_hash = "$6$..."    # also allow root password logins: openssl passwd -6
