@@ -1,0 +1,125 @@
+# Gitea on PiOS / Raspberry Pi 2 (linux/arm/v7).
+#
+# docker.gitea.com/gitea only ships amd64, arm64 and riscv64 images, which
+# the Pi 2's 32-bit Cortex-A7 cannot run. Gitea still publishes an official
+# linux-arm-6 binary, so this stack runs that binary:
+#
+#   init    downloads the pinned binary into the data volume once, checks
+#           its sha256 and writes a lean app.ini (first start only)
+#   server  runs it as uid 1000 on alpine/git (Gitea needs the git CLI)
+#
+# Tuned for 1 GB of RAM: SQLite (no database container), no code indexer,
+# issue search in the database, built-in SSH server (no sshd), offline mode,
+# a soft Go memory limit and a hard container limit.
+#
+#   docker --context pi compose up -d       # then open http://pios:3000
+#
+# The first visit shows Gitea's install page with these settings filled in;
+# create the admin account there. To upgrade, change GITEA_VERSION and
+# GITEA_SHA256 (from https://dl.gitea.com/gitea/<version>/) and run
+# `compose up -d` again.
+
+name: gitea
+
+x-gitea: &gitea
+  GITEA_VERSION: "28.2.0"
+  GITEA_SHA256: "611f475dec5e085ec994283f1e74a53f9dda03d254cc8bb792a23a5b24e413fa"
+  # Host name or IP clients use to reach the Pi (clone URLs, links).
+  GITEA_HOST: ${GITEA_HOST:-pios}
+
+services:
+  init:
+    image: alpine:3.22
+    environment: *gitea
+    volumes:
+      - data:/data
+    restart: "no"
+    command:
+      - sh
+      - -euc
+      - |
+        bin=/data/bin/gitea-$$GITEA_VERSION
+        if [ ! -x "$$bin" ]; then
+          mkdir -p /data/bin
+          url=https://dl.gitea.com/gitea/$$GITEA_VERSION/gitea-$$GITEA_VERSION-linux-arm-6
+          echo "downloading $$url"
+          wget -q -O "$$bin.part" "$$url"
+          echo "$$GITEA_SHA256  $$bin.part" | sha256sum -c -
+          chmod 755 "$$bin.part"
+          mv "$$bin.part" "$$bin"
+        fi
+        ln -sfn "gitea-$$GITEA_VERSION" /data/bin/gitea
+        # Keep only the current binary (107 MB each).
+        find /data/bin -name 'gitea-*' ! -name "gitea-$$GITEA_VERSION" -delete
+        mkdir -p /data/gitea/conf /data/gitea/log /data/git/repositories /data/home
+        if [ ! -f /data/gitea/conf/app.ini ]; then
+          cat > /data/gitea/conf/app.ini <<EOF
+        APP_NAME = Gitea
+        RUN_MODE = prod
+        RUN_USER = git
+        WORK_PATH = /data/gitea
+
+        [server]
+        PROTOCOL = http
+        HTTP_PORT = 3000
+        DOMAIN = $$GITEA_HOST
+        ROOT_URL = http://$$GITEA_HOST:3000/
+        APP_DATA_PATH = /data/gitea
+        DISABLE_SSH = false
+        START_SSH_SERVER = true
+        SSH_DOMAIN = $$GITEA_HOST
+        SSH_PORT = 2222
+        SSH_LISTEN_PORT = 2222
+        LFS_START_SERVER = false
+        OFFLINE_MODE = true
+
+        [database]
+        DB_TYPE = sqlite3
+        PATH = /data/gitea/gitea.db
+        SQLITE_JOURNAL_MODE = WAL
+
+        [repository]
+        ROOT = /data/git/repositories
+        SCRIPT_TYPE = sh
+
+        [indexer]
+        REPO_INDEXER_ENABLED = false
+        ISSUE_INDEXER_TYPE = db
+
+        [log]
+        MODE = console
+        LEVEL = info
+        ROOT_PATH = /data/gitea/log
+
+        [security]
+        INSTALL_LOCK = false
+        EOF
+        fi
+        chown 1000:1000 /data/gitea /data/gitea/conf /data/gitea/conf/app.ini /data/gitea/log /data/git /data/git/repositories /data/home
+        echo "gitea $$GITEA_VERSION ready"
+
+  server:
+    image: alpine/git:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    user: "1000:1000"
+    entrypoint: ["/data/bin/gitea"]
+    command: ["web", "--config", "/data/gitea/conf/app.ini"]
+    environment:
+      USER: git
+      HOME: /data/home
+      GITEA_WORK_DIR: /data/gitea
+      # Go collects harder near this, well below the container limit.
+      GOMEMLIMIT: 300MiB
+    volumes:
+      - data:/data
+    ports:
+      - "3000:3000"   # web
+      - "2222:2222"   # git over SSH (Gitea's built-in server)
+    mem_limit: 450m
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+volumes:
+  data:

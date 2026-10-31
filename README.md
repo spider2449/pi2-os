@@ -95,6 +95,10 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 
 尚未支援：`build`、swarm、plugin、一個容器連多個網路、網路間隔離、IPv6、自訂 seccomp profile、`docker cp`/`diff`/`commit`/`export`、volume 首次使用時複製 image 內容、`--tty` 下的 `tty` 指令顯示（pty 來自 host 的 devpts）。需要這些時用 `kind = "docker"`；兩個引擎都編在同一個 binary 裡，切換只改設定檔。
 
+### Gitea（`examples/gitea`）
+
+官方 image 只有 amd64/arm64/riscv64，Pi 2 的 32 位元 Cortex-A7 跑不動；`examples/gitea/compose.yaml` 改用 Gitea 官方的 `linux-arm-6` 執行檔（固定版本、驗 sha256），SQLite、不開 code indexer、內建 SSH server、`GOMEMLIMIT` 與 450 MB 容器上限。`docker --context pi compose up -d` 後開 `http://pios:3000` 完成安裝。實機（native 引擎）：`up -d` 約 1 分鐘（含下載 107 MB 執行檔），Gitea 常駐約 115 MB，HTTP 與 SSH（埠 2222）push 正常，重開機後自動恢復。
+
 ## 效能相關設計
 
 - Rust：musl 靜態連結、fat LTO、`codegen-units=1`、`panic=abort`、`target-cpu=cortex-a7`、mimalloc。
