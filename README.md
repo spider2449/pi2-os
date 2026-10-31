@@ -24,7 +24,7 @@ GPU firmware (start_cd.elf)
 | `pios-engine-docker` | daemon.json 生成、containerd/dockerd 服務、關機時優雅停止容器 |
 | `pios-engine-native` | Rust-native 引擎（youki）的預留位置 |
 | `pios-ctl` | `pios-ctl status / mem / logs / restart / reboot / tryboot`；`ctld` 以 mTLS 對外提供同一套協定 |
-| `pios-update` | A/B rootfs 更新：寫入閒置分割區、firmware tryboot、引擎就緒後 commit，失敗自動回滾 |
+| `pios-update` | A/B 更新（rootfs + kernel）：寫入閒置 slot、firmware tryboot、引擎就緒後 commit，失敗自動回滾 |
 | `pios` | multi-call binary，以 cargo feature 選擇要編入哪些引擎 |
 
 所有模組在原始碼層獨立、可單獨測試；執行時合併成一個 binary，程式碼只在 page cache 中存在一份。
@@ -48,9 +48,9 @@ cargo xtask qemu       # 在 qemu-system-arm -M raspi2b 中開機
 
 | 分割區 | 檔案系統 | 大小 | 內容 |
 |---|---|---|---|
-| p1 | FAT32 | 128 MiB | firmware、`kernel7.img`、`pios.toml`、`docker-tls/` |
+| p1 | FAT32 | 128 MiB | firmware、`config.txt`、`pios.toml`、`docker-tls/`；`p2/`、`p3/` 各放一個 slot 的 kernel、device tree、`cmdline.txt` |
 | p2 | squashfs (lz4) | 256 MiB | 唯讀 rootfs A |
-| p3 | — | 256 MiB | 預留給 A/B 更新 |
+| p3 | squashfs | 256 MiB | 唯讀 rootfs B（A/B 更新） |
 | p4 | ext4 | 首次開機擴張至整張卡 | `/var/lib/docker`、`/var/lib/containerd` |
 
 root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
@@ -81,9 +81,11 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 cargo xtask rootfs && cargo xtask deploy     # PIOS_HOST 預設為 pios
 ```
 
-`deploy` 透過 SSH 把 rootfs 串流給 Pi 上的 `pios update apply`：寫入閒置的 root 分割區（p2↔p3）並以 sha256 回讀驗證，再用 firmware 的一次性 **tryboot** 旗標重開機到新系統。新系統在引擎就緒後自己 commit（把 `cmdline.txt` 永久指過去）；在那之前的任何失敗——kernel panic、init 崩潰、10 分鐘內引擎沒起來——都會以一般重開機收場，firmware 便讀回 `config.txt`，回到舊系統。Docker 資料在 p4，不受影響。實機量測：整個流程約 1 分鐘；刻意部署壞掉的映像檔，約 40 秒後自動回到舊系統。
+每個 slot 是一個 root 分割區加上 boot 分割區上同名的目錄：p2 ↔ `p2/`、p3 ↔ `p3/`，目錄裡是該 slot 的 `kernel7.img`、device tree 與 `cmdline.txt`，由 `config.txt` 的 `os_prefix` 選擇。`deploy` 先把 rootfs、kernel 與 firmware 打包成 `out/pios-update.tar`（`cargo xtask bundle`，含各檔 sha256 的 manifest），透過 SSH 串流給 Pi 上的 `pios update apply`：rootfs 寫入閒置分割區、kernel 寫入閒置 slot 目錄，全部回讀驗證，再用 firmware 的一次性 **tryboot** 旗標重開機到新系統（`tryboot.txt` 指向新 slot）。新系統在引擎就緒後自己 commit（把 `config.txt` 的 `os_prefix` 永久指過去）；在那之前的任何失敗——kernel panic、init 崩潰、10 分鐘內引擎沒起來——都會以一般重開機收場，firmware 便讀回 `config.txt`，回到舊的 rootfs 與舊的 kernel。Docker 資料在 p4，不受影響。實機量測：整個流程（rootfs + kernel）約 1 分鐘；刻意部署一個 kernel panic 的 slot，約 20–40 秒後自動回到舊系統。
 
-在 Pi 上：`pios update status` 查看兩個分割區的狀態。目前只更新 rootfs；kernel 與 firmware 位於共用的 boot 分割區，仍需重燒。
+GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的：firmware 本身當掉時還沒有任何東西能回滾（實機上以 tryboot 測試另一份 `start_file` 會讓板子停住，必須斷電重開），所以 firmware 只在明確要求時更新（`PIOS_DEPLOY_FIRMWARE=1 cargo xtask deploy`），而且等新 slot commit 之後才寫入，不受回滾保護。
+
+在 Pi 上：`pios update status` 查看兩個 slot 的狀態與版本。也接受單純的 squashfs（`pios update apply rootfs.squashfs`），此時新 slot 沿用目前的 kernel。舊版映像（kernel 放在 boot 分割區根目錄）可以直接 deploy：第一次 deploy 只會送 rootfs（舊版不認得 bundle），之後再 deploy 一次就換成 slot 版面；`os_prefix` 指向的目錄不完整時，firmware 會退回根目錄的 kernel。
 
 ## 效能相關設計
 
@@ -106,11 +108,11 @@ cargo xtask rootfs && cargo xtask deploy     # PIOS_HOST 預設為 pios
 
 ## 狀態與後續
 
-已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH、A/B 更新與自動回滾。
+已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH、A/B 更新（rootfs + kernel）與自動回滾。
 
 實機（Pi 2 v1.1）量測：kernel 啟動到 `pios: engine ready` 約 19–22 s；整機記憶體使用約 57 MB，PiOS 自身約 3 MB；
 `docker run --rm alpine true` 約 3 s，主要是 dockerd（Go）本身的 CPU 時間。
 
 WSL2 建置：`bash build/setup-wsl.sh` 一次，之後 `cargo xtask all`。
 
-後續：kernel/firmware 的安全更新、Rust-native 引擎（大幅降低 `docker run` 延遲與約 120 MB 記憶體）。
+後續：Rust-native 引擎（大幅降低 `docker run` 延遲與約 120 MB 記憶體）、firmware 更新的回滾保護（需要硬體 watchdog 在 firmware 階段介入）。

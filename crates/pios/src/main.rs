@@ -48,9 +48,9 @@ fn select_engine(kind: pios_core::config::EngineKind) -> Option<Box<dyn pios_eng
 }
 
 #[cfg(target_os = "linux")]
-const UPDATE_USAGE: &str = "usage: pios update status\n       pios update apply [--sha256 HEX] [--reboot] <FILE|->";
+const UPDATE_USAGE: &str = "usage: pios update status\n       pios update apply [--sha256 HEX] [--firmware] [--reboot] <BUNDLE|ROOTFS|->";
 
-/// `pios update`: A/B rootfs updates (see the pios-update crate).
+/// `pios update`: A/B rootfs and kernel updates (see the pios-update crate).
 #[cfg(target_os = "linux")]
 fn update(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -62,13 +62,14 @@ fn update(args: &[String]) -> i32 {
             Err(e) => report("update", Err(e)),
         },
         Some("apply") => {
-            let mut opts = pios_update::ApplyOptions { sha256: None, reboot: false };
+            let mut opts = pios_update::ApplyOptions { sha256: None, firmware: false, reboot: false };
             let mut source = None;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--sha256" => opts.sha256 = it.next().cloned(),
                     "--reboot" => opts.reboot = true,
+                    "--firmware" => opts.firmware = true,
                     _ => source = Some(a.clone()),
                 }
             }

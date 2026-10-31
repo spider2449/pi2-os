@@ -29,9 +29,11 @@ usage: cargo xtask <command>
   certs        generate mTLS certificates for remote docker access
   rootfs       assemble and compress the root filesystem (squashfs)
   image        assemble out/images/pios.img
+  bundle       pack rootfs, kernel and firmware into out/pios-update.tar
   all          everything above except certs, in order
   qemu         boot the image in qemu-system-arm -M raspi2b
-  deploy       A/B-update a running board over SSH (PIOS_HOST, default pios)
+  deploy       A/B-update a running board over SSH (PIOS_HOST, default pios;
+               PIOS_DEPLOY_FIRMWARE=1 also replaces the GPU firmware)
   test         run host unit tests
   shell        open a shell in the build container
 
@@ -161,9 +163,11 @@ impl Xtask {
                 self.firmware()?;
                 self.thirdparty()?;
                 self.rootfs()?;
-                self.image()
+                self.image()?;
+                self.bundle()
             }
             "qemu" => self.qemu(),
+            "bundle" => self.bundle(),
             "deploy" => self.deploy(),
             "shell" => run(&mut Command::new("bash")),
             _ => Err(format!("unknown command '{cmd}'\n{USAGE}")),
@@ -377,15 +381,60 @@ impl Xtask {
         Ok(())
     }
 
+    /// `version` line of update manifests: crate version, date, git commit.
+    fn build_version(&self) -> String {
+        let commit = Command::new("git")
+            .current_dir(&self.root)
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or("unknown".into(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let date = Command::new("date")
+            .args(["-u", "+%Y-%m-%dT%H:%MZ"])
+            .output()
+            .map_or(String::new(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        format!("{} {date} {commit}", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Manifest over `files` (name, path), sha256 computed here.
+    fn manifest(&self, files: &[(&str, PathBuf)]) -> Result<pios_update::Manifest> {
+        let mut m = pios_update::Manifest { version: self.build_version(), files: Vec::new() };
+        for (name, path) in files {
+            let out = Command::new("sha256sum").arg(path).output().map_err(|e| format!("sha256sum: {e}"))?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let sum = text.split_whitespace().next().filter(|_| out.status.success()).ok_or(format!("sha256sum {}", path.display()))?;
+            m.files.push((name.to_string(), sum.to_string()));
+        }
+        Ok(m)
+    }
+
+    fn kernel_files(&self) -> Vec<(&'static str, PathBuf)> {
+        pios_update::KERNEL_FILES.iter().map(|f| (*f, self.out.join("kernel").join(f))).collect()
+    }
+
     fn image(&self) -> Result {
         let images = self.out.join("images");
         let boot = self.work.join("bootfs");
+        // Slot A: kernel, device tree and command line live in p2/ (the
+        // firmware's os_prefix), next to the rootfs in partition 2. The flat
+        // cmdline.txt mirrors the default slot's for the firmware's fallback.
+        let board_config = std::fs::read_to_string(self.root.join("board/rpi2/config.txt")).map_err(|e| e.to_string())?;
+        let slot = "p2";
+        let manifest = self.manifest(&self.kernel_files())?;
+        std::fs::create_dir_all(&self.work).map_err(|e| e.to_string())?;
+        let gen = self.work.join("bootgen");
+        std::fs::create_dir_all(&gen).map_err(|e| e.to_string())?;
+        std::fs::write(gen.join("config.txt"), pios_update::slot_config(&board_config, Some(slot), false)).map_err(|e| e.to_string())?;
+        std::fs::write(gen.join("manifest.txt"), manifest.render()).map_err(|e| e.to_string())?;
         sh(&format!(
             r#"
-            b='{boot}'; i='{images}'; rm -rf "$b"; mkdir -p "$b" "$i"
+            b='{boot}'; i='{images}'; rm -rf "$b"; mkdir -p "$b/{slot}" "$i"
             cp '{out}'/firmware/* "$b/"
-            cp '{out}/kernel/kernel7.img' '{out}/kernel/bcm2709-rpi-2-b.dtb' "$b/"
-            cp '{board}/config.txt' '{board}/cmdline.txt' "$b/"
+            cp '{out}/kernel/kernel7.img' '{out}/kernel/bcm2709-rpi-2-b.dtb' "$b/{slot}/"
+            cp '{gen}/config.txt' "$b/config.txt"
+            cp '{gen}/manifest.txt' "$b/{slot}/manifest.txt"
+            cp '{board}/cmdline.txt' "$b/cmdline.txt"; cp '{board}/cmdline.txt' "$b/{slot}/cmdline.txt"
             # Board-specific settings (gitignored) win over the shipped example.
             if [ -f '{board}/pios.local.toml' ]; then cp '{board}/pios.local.toml' "$b/pios.toml"
             else cp '{overlay}/etc/pios/pios.toml.example' "$b/pios.toml"; fi
@@ -402,6 +451,7 @@ impl Xtask {
             "#,
             boot = boot.display(),
             images = images.display(),
+            gen = gen.display(),
             out = self.out.display(),
             board = self.p("board/rpi2"),
             overlay = self.p("rootfs/overlay"),
@@ -411,23 +461,61 @@ impl Xtask {
         ))
     }
 
-    /// Stream out/rootfs.squashfs to a running board, which writes it to its
-    /// inactive slot and reboots into it once (firmware tryboot). The board
-    /// commits the update when its engine comes up, or rolls back.
-    fn deploy(&self) -> Result {
-        let host = std::env::var("PIOS_HOST").unwrap_or_else(|_| "pios".into());
-        let image = self.out.join("rootfs.squashfs");
-        if !image.exists() {
-            return Err(format!("{} missing; run 'cargo xtask rootfs'", image.display()));
+    /// out/pios-update.tar: manifest, kernel, firmware and rootfs, in the
+    /// order `pios update apply` consumes them (rootfs last, streamed).
+    fn bundle(&self) -> Result {
+        let rootfs = self.out.join("rootfs.squashfs");
+        if !rootfs.exists() {
+            return Err(format!("{} missing; run 'cargo xtask rootfs'", rootfs.display()));
+        }
+        let mut files = self.kernel_files();
+        files.extend(pios_update::FIRMWARE_FILES.iter().map(|f| (*f, self.out.join("firmware").join(f))));
+        files.push((pios_update::BUNDLE_ROOTFS, rootfs));
+        if let Some((_, missing)) = files.iter().find(|(_, p)| !p.exists()) {
+            return Err(format!("{} missing; run 'cargo xtask all'", missing.display()));
+        }
+        let manifest = self.manifest(&files)?;
+        let stage = self.work.join("bundle");
+        let _ = std::fs::remove_dir_all(&stage);
+        std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+        std::fs::write(stage.join(pios_update::MANIFEST), manifest.render()).map_err(|e| e.to_string())?;
+        let mut names = vec![pios_update::MANIFEST.to_string()];
+        let mut links = String::new();
+        for (name, path) in &files {
+            links.push_str(&format!("ln -s '{}' '{}/{name}'\n", path.display(), stage.display()));
+            names.push(name.to_string());
         }
         sh(&format!(
+            "{links}tar --format=ustar --dereference --owner=0 --group=0 -cf '{out}/pios-update.tar' -C '{stage}' {names} && ls -lh '{out}/pios-update.tar'",
+            out = self.out.display(),
+            stage = stage.display(),
+            names = names.join(" "),
+        ))?;
+        eprintln!("bundle version: {}", manifest.version);
+        Ok(())
+    }
+
+    /// Stream an update bundle (rootfs + kernel) to a running board, which
+    /// writes it to its inactive slot and reboots into it once (firmware
+    /// tryboot). The board commits the update when its engine comes up, or
+    /// rolls back. A board on a release without bundle support gets the
+    /// rootfs alone; deploying again then brings the kernel.
+    fn deploy(&self) -> Result {
+        let host = std::env::var("PIOS_HOST").unwrap_or_else(|_| "pios".into());
+        self.bundle()?;
+        let firmware = if std::env::var_os("PIOS_DEPLOY_FIRMWARE").is_some() { "--firmware" } else { "" };
+        sh(&format!(
             r#"
-            img='{img}'; host='{host}'
+            bundle='{bundle}'; rootfs='{rootfs}'; host='{host}'
+            st=$(ssh "$host" pios update status); echo "$st"
+            case "$st" in
+              *"bundles : supported"*) img=$bundle; what="update bundle" ;;
+              *) img=$rootfs; what="rootfs (this board predates bundles; deploy again for the kernel)" ;;
+            esac
             sum=$(sha256sum "$img" | cut -d' ' -f1)
-            echo "deploying $(du -h "$img" | cut -f1) rootfs (sha256 ${{sum:0:16}}...) to $host"
-            ssh "$host" pios update status
+            echo "deploying $(du -h "$img" | cut -f1) $what (sha256 ${{sum:0:16}}...) to $host"
             # 255 = the connection dropped because the board started rebooting.
-            rc=0; ssh "$host" pios update apply --sha256 "$sum" --reboot - < "$img" || rc=$?
+            rc=0; ssh "$host" pios update apply --sha256 "$sum" {firmware} --reboot - < "$img" || rc=$?
             [ $rc -eq 0 ] || [ $rc -eq 255 ] || exit $rc
             echo "waiting for $host to come back from the trial boot..."
             sleep 20; start=$(date +%s)
@@ -441,7 +529,8 @@ impl Xtask {
             done
             echo "$s"
             "#,
-            img = image.display(),
+            bundle = self.out.join("pios-update.tar").display(),
+            rootfs = self.out.join("rootfs.squashfs").display(),
         ))
     }
 

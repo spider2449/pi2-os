@@ -112,10 +112,15 @@ pub fn with_boot_writable<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 /// Replace a file on the boot partition via a temporary file and rename, so
 /// a power cut leaves either the old or the new content (FAT permitting).
 pub fn write_boot_file(name: &str, content: &str) -> Result<()> {
+    write_boot_bytes(name, content.as_bytes())
+}
+
+/// `write_boot_file` for binary content; `name` may include a directory.
+pub fn write_boot_bytes(name: &str, content: &[u8]) -> Result<()> {
     let path = Path::new(crate::paths::BOOT_DIR).join(name);
     let tmp = path.with_extension("tmp");
     let mut f = std::fs::File::create(&tmp).ctx(|| format!("create {}", tmp.display()))?;
-    std::io::Write::write_all(&mut f, content.as_bytes()).ctx(|| format!("write {}", tmp.display()))?;
+    std::io::Write::write_all(&mut f, content).ctx(|| format!("write {}", tmp.display()))?;
     f.sync_all().ctx(|| format!("fsync {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).ctx(|| format!("rename {}", path.display()))
 }
