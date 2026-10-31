@@ -59,7 +59,7 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 
 1. 個人設定放在 `board/rpi2/pios.local.toml`（gitignored，格式見 `rootfs/overlay/etc/pios/pios.toml.example`），SSH 公鑰放在 `board/rpi2/authorized_keys`；`cargo xtask image` 會把它們放進 boot 分割區。
 2. 燒錄、接網路線與 HDMI 開機。畫面出現 `pios: engine ready`、ACT 燈變心跳閃，代表 Docker 已可使用。
-3. 從 PC 連線（需先 `cargo xtask certs`，憑證名稱為 `pios`，請讓 `pios` 解析到 Pi 的 IP）：
+3. 從 PC 連線（需先 `cargo xtask certs`，憑證名稱為 `pios`，請讓 `pios` 解析到 Pi 的 IP；SSH、Docker 各自怎麼運作見〈連線方式〉）：
 
    ```sh
    docker context create pi --docker "host=tcp://pios:2376,ca=out/certs/client/ca.pem,cert=out/certs/client/cert.pem,key=out/certs/client/key.pem"
@@ -90,14 +90,111 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 
 確認新卡正常之前，舊卡先留著當退路。
 
-## 管理管道
+## 連線方式：SSH 與 Docker
 
-| 管道 | 埠 | 說明 |
-|---|---|---|
-| Docker API | 2376 | mTLS（Ed25519） |
-| `tools/pios-remote` | 2377 | `status` / `logs` / `restart` / `reboot`；經 `ctld` 轉給 PID 1，**dockerd 掛掉也能用** |
-| SSH（dropbear，選用） | 22 | `[ssh] enabled = true`；預設只允許金鑰，設 `password_hash`（`openssl passwd -6` 產生）後 root 也能用密碼登入 |
-| HDMI console / `pios-boot.log` / ACT LED | — | 開機與錯誤診斷，不需要網路 |
+### 概念：四條互不相干的線
+
+板子上有好幾個「可以連進去」的東西。它們的埠、帳號和認證方式各自獨立，混在一起就會亂：
+
+| 要做的事 | 指令 | 埠 | 認證 | 誰在聽 |
+|---|---|---|---|---|
+| 進板子開 shell、看檔案、`cargo xtask deploy` | `ssh root@pios` | 22 | SSH 金鑰，或 root 密碼（選用） | dropbear（PiOS 系統服務） |
+| 管容器：`run`、`ps`、`compose`… | `docker --context pi …` | 2376 | mTLS 用戶端憑證 | dockerd 或 native 引擎 |
+| 引擎掛掉時的救援：`status` / `logs` / `restart` / `reboot` | `tools/pios-remote …` | 2377 | 跟 Docker 同一組 mTLS 憑證 | `ctld`，轉給 PID 1 |
+| `git push` 到 Gitea | `git@pios:2222/…` | 2222 | 你在 Gitea 網頁上登記的公鑰 | Gitea 容器內建的 SSH |
+
+另外還有 HDMI console、`pios-boot.log` 和 ACT LED，都是給開機與錯誤診斷用的，不需要網路。
+
+幾個容易搞混的地方：
+
+- **Docker 不走 SSH。** `docker --context pi` 是用 TLS 憑證直接連 2376。SSH 沒開，Docker 照樣能用；SSH 的金鑰和密碼也跟 Docker 無關。
+- **板子上沒有 `docker` 指令。** rootfs 只有引擎（dockerd 或 native），沒有 docker CLI。容器一律從 PC 透過 docker context 管理，不是先 SSH 進去再下指令。
+- **22 和 2222 是兩台不同的 SSH server。** 22 是板子本身，登入身分是 root。2222 是 Gitea 容器，帳號是 Gitea 的使用者，跟板子的 root 沒有任何關係。
+- **板子只有一個帳號：root。** 這裡說的「帳號登入」指的是 root 用密碼登入。
+- **金鑰和密碼可以同時存在。** 設了密碼，金鑰登入照樣能用；`cargo xtask deploy` 就是靠金鑰（`BatchMode`）自動連線的。
+- **`/boot/pios.toml` 只在開機時讀。** 改完設定一定要重開機才會生效，見下方〈改設定〉。
+
+### SSH（板子本身，埠 22）
+
+在 `pios.toml` 裡啟用：
+
+```toml
+[ssh]
+enabled = true
+port = 22
+# password_hash = "$6$..."   # 選用：允許 root 用密碼登入
+```
+
+**金鑰登入**：把公鑰（例如 `~/.ssh/id_ed25519.pub` 的內容）放進 `board/rpi2/authorized_keys`，一行一把。資料的流向是：
+
+```
+board/rpi2/authorized_keys ──(cargo xtask image)──▶ /boot/authorized_keys ──(開機時複製)──▶ /run/pios/root/.ssh/authorized_keys
+```
+
+**密碼登入**：設定檔裡存的是密碼的**雜湊**，不是密碼本身。用下面任一種方式產生：
+
+```sh
+openssl passwd -6          # PC 上；會問兩次密碼，輸出 $6$... 那一整串
+mkpasswd -m sha512         # 或在板子上用 busybox
+```
+
+把整串填進 `password_hash`。直接填明文密碼的話，開機時會被當成設定錯誤擋下來。開機時 init 會把雜湊寫進 `/run/pios/shadow`（`/etc/shadow` 連結到這裡，因為 rootfs 是唯讀的），並讓 dropbear 接受密碼。沒設 `password_hash` 時，root 密碼是鎖住的，dropbear 也會加上 `-s -g`，完全不接受密碼。
+
+測試密碼登入時，強制不用金鑰：
+
+```sh
+ssh -o PubkeyAuthentication=no root@pios
+```
+
+**Host key**：板子的 SSH host key 存在 p4（`/var/lib/pios/ssh/`），A/B 更新不會變。整張卡重燒之後就會換新，`ssh` 會警告 host key 不符，先清掉舊紀錄：`ssh-keygen -R pios; ssh-keygen -R 192.168.1.50`。Windows 的 OpenSSH 和 WSL 各有自己的 `~/.ssh`（`known_hosts`、私鑰），兩邊要分別處理。
+
+密碼登入比較方便，但 dropbear 擋暴力猜測的能力有限。只在內網開，密碼設長一點；需要從外網連的話，改用金鑰並拿掉 `password_hash`。
+
+### Docker（埠 2376）
+
+Docker 用 **mTLS**（雙向 TLS）：板子出示伺服器憑證，PC 出示用戶端憑證，雙方都由同一個 CA 簽發，所以不需要帳號密碼。
+
+```
+cargo xtask certs  ──▶  out/certs/ca.pem（CA）
+                        out/certs/server/*.pem ──(cargo xtask image)──▶ /boot/docker-tls/   ← 板子用
+                        out/certs/client/*.pem                                               ← PC 用
+```
+
+1. `cargo xtask certs` 只需要跑一次。`out/certs/` 被 gitignore，要自己保存好；重跑會產生新的 CA，舊的 docker context 就連不上了。
+2. 伺服器憑證只對 `pios`、`pios.local`、`localhost` 有效，所以**要用名稱 `pios` 連線，不能直接用 IP**。在 PC 的 hosts 檔加一行，例如 `192.168.1.50 pios`（Windows：`C:\Windows\System32\drivers\etc\hosts`）。如果一定要用 IP，產生憑證時加上 `PIOS_CERT_SAN=IP:192.168.1.50`。
+3. 建立 docker context（一次就好），之後每個指令加上 `--context pi`，或用 `docker context use pi` 設成預設：
+
+   ```sh
+   docker context create pi --docker "host=tcp://pios:2376,ca=out/certs/client/ca.pem,cert=out/certs/client/cert.pem,key=out/certs/client/key.pem"
+   docker --context pi ps
+   ```
+
+`[engine] kind` 不管是 `docker` 還是 `native`，對外都是同一個 2376 埠、同一組憑證，切換引擎不用改 context。
+
+`tools/pios-remote` 也用這組用戶端憑證，預設從 `~/.docker/pios/` 讀，可以把 `out/certs/client/*.pem` 複製過去，或指定 `PIOS_CERTS=out/certs/client`。
+
+### 重開機
+
+```sh
+ssh pios pios-ctl reboot             # 或 ssh pios reboot，兩者都是正常關機流程
+tools/pios-remote reboot             # 不經過 SSH，SSH 或引擎掛掉時用
+```
+
+不要直接拔電源：`/data` 上的容器資料（例如 Gitea 的資料庫）可能還沒寫進卡片。重開大約 1 分鐘，容器會自動恢復。
+
+### 改設定（`/boot/pios.toml`）
+
+`board/rpi2/pios.local.toml` 是設定的正本，`cargo xtask image` 會把它放進映像。板子已經在跑時，不用重燒卡，把它推上去再重開機就好。`/boot` 平常是唯讀掛載，要暫時改成可寫：
+
+```sh
+scp board/rpi2/pios.local.toml pios:/tmp/pios.toml
+ssh pios 'mount -o remount,rw /boot && cp /tmp/pios.toml /boot/pios.toml && sync; mount -o remount,ro /boot'
+ssh pios pios-ctl reboot
+```
+
+反過來，直接在板子上改過的 `/boot/pios.toml` 不會自動回寫，要自己同步回 `pios.local.toml`，否則下次重燒就不見了。
+
+**順序很重要**：設定檔有未知欄位或格式錯誤時，init 會開機失敗（ACT 燈顯示錯誤，每 60 秒重開一次，原因寫在 `pios-boot.log`）。所以新版才有的設定（例如 `password_hash`）要先 `cargo xtask deploy` 更新系統，等兩個 slot 都是新版之後再寫進 `/boot/pios.toml`；不然退回舊 slot 時，舊版看不懂新欄位，就會開不起來。
 
 ### 系統更新（A/B，不需重燒 SD 卡）
 
