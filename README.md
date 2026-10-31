@@ -115,7 +115,7 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 
 - `kernel/VERSION` — raspberrypi/linux `rpi-6.18.y` 指定 commit
 - `board/rpi2/firmware.lock` — GPU firmware 檔案 sha256
-- `third_party.lock` — Docker 29.9.2 armhf 靜態版 sha256、Alpine 輔助套件（iptables、e2fsprogs、CA 憑證、dropbear）
+- `third_party.lock` — Docker 29.9.2 armhf 靜態版 sha256、Alpine 輔助套件（iptables、e2fsprogs、CA 憑證、dropbear、htop）
 - `rootfs/busybox-applets.txt` — busybox 指令連結清單（rootfs 建置時建立）
 
 ## 狀態與後續
