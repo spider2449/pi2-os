@@ -76,7 +76,10 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
    docker --context pi volume ls
    docker --context pi compose -f examples/gitea/compose.yaml stop
    docker --context pi run --rm -v gitea_data:/data alpine tar -C /data -cf - . > gitea-backup.tar
+   tar -tvf gitea-backup.tar | head    # 確認備份有內容
    ```
+
+   備份包含 repo、SQLite 資料庫、`app.ini` 與 Gitea 執行檔（約 107 MB）。
 
 2. **確認設定**：在板子上直接改過的 `/boot/pios.toml` 不會回寫，要同步到 `board/rpi2/pios.local.toml`（例如 `[engine] kind = "native"`、靜態 IP、`[ssh] enabled = true`）。`out/certs/` 留著（gitignored），映像會帶同一組伺服器憑證，現有的 `docker context pi` 不用改；不要重跑 `cargo xtask certs`，除非憑證遺失。
 3. `cargo xtask all`，把 `out/images/pios.img` 燒到新卡（Raspberry Pi Imager → Use custom），開機等 `pios: engine ready`。
@@ -88,7 +91,11 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
    docker --context pi compose -f examples/gitea/compose.yaml up -d
    ```
 
+   備份裡已有 `app.ini`，init 不會覆蓋，之前在 `app.ini` 的修改都會保留；開 `http://pios:3000` 應直接看到原本的 repo，不會出現安裝頁。
+
 確認新卡正常之前，舊卡先留著當退路。
+
+縮短停機：Gitea 從步驟 1 的 `stop` 停到步驟 5 的 `up -d`，大部分時間花在 `cargo xtask all` 與燒錄。可以先做步驟 2–3 把新卡燒好，再回舊卡做步驟 1 備份、換卡，最後做步驟 4–5（前提是備份後沒人再 push）。
 
 ## 連線方式：SSH 與 Docker
 
@@ -182,6 +189,22 @@ tools/pios-remote reboot             # 不經過 SSH，SSH 或引擎掛掉時用
 
 不要直接拔電源：`/data` 上的容器資料（例如 Gitea 的資料庫）可能還沒寫進卡片。重開大約 1 分鐘，容器會自動恢復。
 
+### 重啟容器與引擎
+
+板子上沒有 systemd，也沒有 docker CLI。只重啟容器用 docker context；重啟引擎本身則交給 PID 1 的 supervisor：
+
+```sh
+docker --context pi compose -f examples/gitea/compose.yaml restart server   # 單一 compose service
+docker --context pi restart <container>                                     # 單一容器
+
+tools/pios-remote restart engined    # native 引擎
+tools/pios-remote restart dockerd    # docker 引擎（containerd 另有自己的服務）
+tools/pios-remote status             # 各服務狀態與重啟次數
+tools/pios-remote logs engined       # 引擎 log
+```
+
+有開 SSH 的話，`ssh pios pios-ctl restart engined` 效果相同。引擎重啟時容器會跟著停止；設了 `restart: unless-stopped` 或 `always` 的容器會在引擎起來後自動恢復，其他容器要自己再啟動。
+
 ### 改設定（`/boot/pios.toml`）
 
 `board/rpi2/pios.local.toml` 是設定的正本，`cargo xtask image` 會把它放進映像。板子已經在跑時，不用重燒卡，把它推上去再重開機就好。`/boot` 平常是唯讀掛載，要暫時改成可寫：
@@ -219,6 +242,15 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 ### Gitea（`examples/gitea`）
 
 官方 image 只有 amd64/arm64/riscv64，Pi 2 的 32 位元 Cortex-A7 跑不動；`examples/gitea/compose.yaml` 改用 Gitea 官方的 `linux-arm-6` 執行檔（固定版本、驗 sha256），SQLite、不開 code indexer、內建 SSH server、`GOMEMLIMIT` 與 450 MB 容器上限。`docker --context pi compose up -d` 後開 `http://pios:3000` 完成安裝。實機（native 引擎）：`up -d` 約 1 分鐘（含下載 107 MB 執行檔），Gitea 常駐約 115 MB，HTTP 與 SSH（埠 2222）push 正常，重開機後自動恢復。
+
+**`app.ini`**：由 init 在第一次啟動時寫入 `gitea_data` volume，容器內路徑是 `/data/gitea/conf/app.ini`；在板子上是 `/data/native/volumes/gitea_data/_data/gitea/conf/app.ini`（native 引擎）或 `/var/lib/docker/volumes/gitea_data/_data/gitea/conf/app.ini`（docker 引擎）。init 只在檔案不存在時才寫，之後 `compose up -d` 不會覆蓋你的修改；`down -v` 刪掉 volume 時它會一起消失。不用 SSH 也能從 PC 修改：
+
+```sh
+docker --context pi run --rm -it -v gitea_data:/data alpine vi /data/gitea/conf/app.ini
+docker --context pi compose -f examples/gitea/compose.yaml restart server
+```
+
+這個 stack 直接跑 Gitea 執行檔，沒有官方 image 那個把 `GITEA__section__KEY` 環境變數轉寫進 `app.ini` 的啟動腳本，所以設定最好直接寫在 `app.ini`。
 
 ## 效能相關設計
 
