@@ -32,8 +32,9 @@ usage: cargo xtask <command>
   bundle       pack rootfs, kernel and firmware into out/pios-update.tar
   all          everything above except certs, in order
   qemu         boot the image in qemu-system-arm -M raspi2b
-  deploy       A/B-update a running board over SSH (PIOS_HOST, default pios;
-               PIOS_DEPLOY_FIRMWARE=1 also replaces the GPU firmware)
+  deploy       rebuild pios + rootfs, then A/B-update a running board over SSH
+               (PIOS_HOST, default pios; PIOS_DEPLOY_FIRMWARE=1 also replaces
+               the GPU firmware)
   test         run host unit tests
   shell        open a shell in the build container
 
@@ -501,8 +502,15 @@ impl Xtask {
     /// tryboot). The board commits the update when its engine comes up, or
     /// rolls back. A board on a release without bundle support gets the
     /// rootfs alone; deploying again then brings the kernel.
+    ///
+    /// The pios binary and rootfs are always rebuilt first, so a stale
+    /// out/rootfs.squashfs is never shipped under the current version. The
+    /// kernel and firmware are taken from out/ as they are (slow to build,
+    /// rarely changed; run `cargo xtask kernel` when they do).
     fn deploy(&self) -> Result {
         let host = std::env::var("PIOS_HOST").unwrap_or_else(|_| "pios".into());
+        self.build()?;
+        self.rootfs()?;
         self.bundle()?;
         let firmware = if std::env::var_os("PIOS_DEPLOY_FIRMWARE").is_some() { "--firmware" } else { "" };
         sh(&format!(

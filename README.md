@@ -102,7 +102,7 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 ### 系統更新（A/B，不需重燒 SD 卡）
 
 ```sh
-cargo xtask rootfs && cargo xtask deploy     # PIOS_HOST 預設為 pios
+cargo xtask deploy     # 先重建 pios 與 rootfs；PIOS_HOST 預設為 pios
 ```
 
 每個 slot 是一個 root 分割區加上 boot 分割區上同名的目錄：p2 ↔ `p2/`、p3 ↔ `p3/`，目錄裡是該 slot 的 `kernel7.img`、device tree 與 `cmdline.txt`，由 `config.txt` 的 `os_prefix` 選擇。`deploy` 先把 rootfs、kernel 與 firmware 打包成 `out/pios-update.tar`（`cargo xtask bundle`，含各檔 sha256 的 manifest），透過 SSH 串流給 Pi 上的 `pios update apply`：rootfs 寫入閒置分割區、kernel 寫入閒置 slot 目錄，全部回讀驗證，再用 firmware 的一次性 **tryboot** 旗標重開機到新系統（`tryboot.txt` 指向新 slot）。新系統在引擎就緒後自己 commit（把 `config.txt` 的 `os_prefix` 永久指過去）；在那之前的任何失敗——kernel panic、init 崩潰、10 分鐘內引擎沒起來——都會以一般重開機收場，firmware 便讀回 `config.txt`，回到舊的 rootfs 與舊的 kernel。Docker 資料在 p4，不受影響。實機量測：整個流程（rootfs + kernel）約 1 分鐘；刻意部署一個 kernel panic 的 slot，約 20–40 秒後自動回到舊系統。
