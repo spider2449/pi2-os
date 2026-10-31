@@ -6,7 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["engine-docker"]
+# Both engines are compiled in; `[engine] kind` picks one at boot.
+default = ["engine-docker", "engine-native"]
 engine-docker = ["dep:pios-engine-docker"]
 engine-native = ["dep:pios-engine-native"]
 # mimalloc beats musl's allocator by a wide margin; needs a C cross compiler

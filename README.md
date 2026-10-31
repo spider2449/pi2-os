@@ -22,7 +22,7 @@ GPU firmware (start_cd.elf)
 | `pios-tune` | sysctl、CPU governor、SD 卡 I/O scheduler |
 | `pios-engine-api` | `ContainerEngine` trait —— init 只認得這個介面 |
 | `pios-engine-docker` | daemon.json 生成、containerd/dockerd 服務、關機時優雅停止容器 |
-| `pios-engine-native` | Rust-native 引擎（youki）的預留位置 |
+| `pios-engine-native` | Rust-native 引擎：單一 daemon 提供 Docker Engine API 子集、自行 pull image、內建 runtime（namespaces、overlayfs、cgroup v2），取代 dockerd + containerd + shim + runc |
 | `pios-ctl` | `pios-ctl status / mem / logs / restart / reboot / tryboot`；`ctld` 以 mTLS 對外提供同一套協定 |
 | `pios-update` | A/B 更新（rootfs + kernel）：寫入閒置 slot、firmware tryboot、引擎就緒後 commit，失敗自動回滾 |
 | `pios` | multi-call binary，以 cargo feature 選擇要編入哪些引擎 |
@@ -87,6 +87,14 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 
 在 Pi 上：`pios update status` 查看兩個 slot 的狀態與版本。也接受單純的 squashfs（`pios update apply rootfs.squashfs`），此時新 slot 沿用目前的 kernel。舊版映像（kernel 放在 boot 分割區根目錄）可以直接 deploy：第一次 deploy 只會送 rootfs（舊版不認得 bundle），之後再 deploy 一次就換成 slot 版面；`os_prefix` 指向的目錄不完整時，firmware 會退回根目錄的 kernel。
 
+### Native 引擎（`[engine] kind = "native"`）
+
+`pios engined` 是單一 Rust daemon，在 `/var/run/docker.sock` 與 2376（mTLS，同一組憑證）上提供 docker CLI 日常需要的 Docker Engine API 子集：`run`（含 `-d`、`-it`、`--rm`、`-p`、`-v`、`-e`、`-w`、`-u`、`--restart`、`--memory`、`--cpus`、`--pids-limit`、`--cap-add/--cap-drop`、`--privileged`、`--device`、`--network host|none`、`--init`）、`ps`、`logs -f`、`exec -it`、`stop`/`kill`/`restart`/`rm`、`pull`/`images`/`rmi`、`volume`、`network`、`inspect`，以及 `docker compose`（實機以 `examples/gitea` 測試過 `up -d`、`ps`、`logs`、`down -v`、`depends_on: service_completed_successfully`）。image 直接從 registry pull（token 認證、linux/arm/v7 選擇、逐層 sha256 驗證），容器由 `pios container-init` 啟動：namespaces、overlayfs、pivot_root、Docker 預設 capability 集合、cgroup v2 限制；預設 seccomp 過濾（同 Docker：keyring、bpf、io_uring、userfaultfd、建立 user namespace 等，依 capability 放行）；bridge 網路 `pios0`（172.17.0.0/16）、使用者自訂網路（172.18–31.0.0/16，含以容器名稱/compose service 名稱解析的內建 DNS）與 iptables NAT/port 轉發。沒有 containerd、shim、runc，也沒有每個容器一個 Go 行程。
+
+實機（Pi 2 v1.1）量測，與 Docker 引擎對照：`docker run --rm alpine true` 0.53 s（dockerd 2.25 s）；整機記憶體 29 MB（59 MB）；engined RSS 約 5 MB（dockerd + containerd 約 113 MB），每個執行中的容器另有約 1.7 MB 的 helper（大多為共用頁面）；開機後 5 s 引擎就緒。
+
+尚未支援：`build`、swarm、plugin、一個容器連多個網路、網路間隔離、IPv6、自訂 seccomp profile、`docker cp`/`diff`/`commit`/`export`、volume 首次使用時複製 image 內容、`--tty` 下的 `tty` 指令顯示（pty 來自 host 的 devpts）。需要這些時用 `kind = "docker"`；兩個引擎都編在同一個 binary 裡，切換只改設定檔。
+
 ## 效能相關設計
 
 - Rust：musl 靜態連結、fat LTO、`codegen-units=1`、`panic=abort`、`target-cpu=cortex-a7`、mimalloc。
@@ -108,11 +116,11 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 
 ## 狀態與後續
 
-已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH、A/B 更新（rootfs + kernel）與自動回滾。
+已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH、A/B 更新（rootfs + kernel）與自動回滾、Rust-native 引擎。
 
 實機（Pi 2 v1.1）量測：kernel 啟動到 `pios: engine ready` 約 19–22 s；整機記憶體使用約 57 MB，PiOS 自身約 3 MB；
 `docker run --rm alpine true` 約 3 s，主要是 dockerd（Go）本身的 CPU 時間。
 
 WSL2 建置：`bash build/setup-wsl.sh` 一次，之後 `cargo xtask all`。
 
-後續：Rust-native 引擎（大幅降低 `docker run` 延遲與約 120 MB 記憶體）、firmware 更新的回滾保護（需要硬體 watchdog 在 firmware 階段介入）。
+後續：firmware 更新的回滾保護（需要硬體 watchdog 在 firmware 階段介入）。

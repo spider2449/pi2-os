@@ -223,7 +223,7 @@ pub struct EngineConfig {
     pub wait_time_sync: bool,
     /// Expose the engine API on TCP 2376 with mutual TLS when certificates exist.
     pub tls_tcp: bool,
-    /// Default OCI runtime. "runc" is built in; any other name is registered
+    /// Default OCI runtime of the docker engine. "runc" is built in; any other name is registered
     /// from /usr/bin/<name> (crun was evaluated and rejected: slower on this
     /// board and it ignored --pid=host).
     pub runtime: String,

@@ -29,7 +29,7 @@ read_ahead_kb = 512
 # "vm.swappiness" = "80"
 
 [engine]
-kind = "docker"               # docker | native (planned) | none
+kind = "docker"               # docker | native (built-in Rust engine, Docker API subset) | none
 wait_time_sync = true         # start dockerd only after the clock is valid
 tls_tcp = true                # tcp://:2376 with mTLS if /boot/docker-tls/*.pem exist
 runtime = "runc"              # OCI runtime; others are registered from /usr/bin/<name>

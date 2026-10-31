@@ -1,6 +1,6 @@
 [package]
 name = "pios-engine-native"
-description = "Rust-native container engine (youki based) - planned"
+description = "Rust-native container engine: Docker API subset, registry pulls, built-in runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,15 @@ license.workspace = true
 [dependencies]
 pios-core.workspace = true
 pios-engine-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# The daemon and runtime only run on the device.
+[target.'cfg(target_os = "linux")'.dependencies]
+pios-ctl.workspace = true
+libc.workspace = true
+sha2 = { version = "0.10", default-features = false }
+flate2 = "1"
+tar = { version = "0.4", default-features = false, features = ["xattr"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }

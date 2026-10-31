@@ -53,7 +53,9 @@ pub fn run(cfg: &PiosConfig) -> Result<()> {
     Ok(())
 }
 
-fn tls_config(dir: &Path) -> Result<ServerConfig> {
+/// Mutual TLS server configuration from `ca.pem`, `server-cert.pem` and
+/// `server-key.pem` in `dir` (also used by the native engine on :2376).
+pub fn tls_config(dir: &Path) -> Result<ServerConfig> {
     let pem_err = |what: &str, e: rustls_pki_types::pem::Error| Error::msg(format!("{what}: {e}"));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut roots = RootCertStore::empty();
