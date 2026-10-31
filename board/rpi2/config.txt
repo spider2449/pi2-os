@@ -9,7 +9,8 @@ start_file=start_cd.elf
 fixup_file=fixup_cd.dat
 disable_splash=1
 boot_delay=0
-hdmi_blanking=2
+# HDMI shows the boot console; no monitor attached costs nothing.
+hdmi_force_hotplug=1
 dtparam=audio=off
 
 # Serial console on GPIO14/15, 115200 8N1.

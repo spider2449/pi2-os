@@ -49,6 +49,8 @@ pub fn engine_dependencies(cfg: &PiosConfig) -> Vec<String> {
 #[cfg(target_os = "linux")]
 mod boot;
 #[cfg(target_os = "linux")]
+mod status;
+#[cfg(target_os = "linux")]
 pub use boot::run;
 
 #[cfg(test)]

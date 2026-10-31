@@ -178,10 +178,10 @@ fn apply(ifname: &str, lease: &Reply, extra_dns: &[Ipv4Addr]) -> Result<()> {
     write_resolv(extra_dns, &lease.dns)?;
     info!(
         "netd",
-        "{ifname} {}/{} gw {:?} lease {}s",
+        "{ifname} {}/{} gw {} lease {}s",
         lease.your_ip,
         lease.prefix(),
-        lease.routers.first(),
+        lease.routers.first().map_or("none".to_string(), |g| g.to_string()),
         lease.lease_secs.unwrap_or(0)
     );
     Ok(())

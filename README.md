@@ -82,7 +82,12 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 
 ## 狀態與後續
 
-已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）。host 單元測試全部通過，armv7 目標型別檢查通過。
-**尚未在實機或 QEMU 上驗證開機**，這是下一步。
+已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）。
+
+已驗證（QEMU `raspi2b`，WSL2 原生建置）：開機 → 擴張 data 分割區 → zram → DHCP → NTP → containerd → dockerd → `pios: engine ready`；
+從 host 透過 mTLS 遠端 `docker run` 成功。開機後整機記憶體使用約 51 MB，其中 PiOS 自身（init + netd + ntpd）約 4 MB，其餘為 dockerd/containerd。
+**尚未在實機上驗證**，這是下一步。
+
+WSL2 建置：`bash build/setup-wsl.sh` 一次，之後 `cargo xtask all`（無 Docker 的 Linux 主機會自動以原生方式建置）。
 
 後續：Phase 4 實機效能量測與 kernel 進一步裁剪；Phase 5 A/B OTA 更新（`pios-update`）與 Rust-native 引擎。

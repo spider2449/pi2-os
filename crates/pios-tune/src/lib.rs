@@ -16,7 +16,8 @@ pub const DEFAULT_SYSCTLS: &[(&str, &str)] = &[
     ("net.core.netdev_max_backlog", "2048"),
     ("net.ipv4.tcp_fastopen", "3"),
     ("net.ipv4.tcp_slow_start_after_idle", "0"),
-    ("net.ipv4.ip_local_port_range", "10240 65000"),
+    // Start even / end odd, as the kernel recommends for port selection.
+    ("net.ipv4.ip_local_port_range", "10240 65001"),
     ("net.netfilter.nf_conntrack_max", "65536"),
     // Memory: zram swap is cheap, SD writeback should be batched.
     ("vm.swappiness", "100"),

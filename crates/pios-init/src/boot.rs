@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pios_core::config::{EngineKind, PiosConfig};
@@ -7,6 +8,7 @@ use pios_core::{error, info, paths, warn, Error, Result};
 use pios_engine_api::EngineContext;
 use pios_supervisor::{Exit, Supervisor};
 
+use crate::status::{self, Led};
 use crate::{cmdline_value, engine_dependencies, system_services, EngineSelector, DEFAULT_BOOT_DEVICE};
 
 /// Seconds since the epoch at build time; the clock never starts earlier.
@@ -27,6 +29,7 @@ pub fn run(select_engine: &EngineSelector) -> ! {
 
 fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
     early_mounts()?;
+    status::led(Led::Booting);
     // Ctrl-Alt-Del becomes SIGINT to PID 1 instead of an immediate reboot.
     // SAFETY: plain syscall.
     unsafe { libc::reboot(libc::RB_DISABLE_CAD) };
@@ -71,8 +74,20 @@ fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
 
     let mut sup = Supervisor::new(services, Some(paths::CTL_SOCKET), cfg.console_service_logs)?;
     if let Some(svc) = milestone {
-        sup.milestone(svc, "pios: engine ready");
+        sup.on_ready(
+            svc,
+            Box::new(|| {
+                ENGINE_READY.store(true, Ordering::Relaxed);
+                // Plain line so humans and test harnesses can spot it.
+                pios_core::log::line(pios_core::log::Level::Info, "pios: engine ready");
+                status::led(Led::Ready);
+                status::save_boot_log("engine ready");
+            }),
+        );
     }
+    // Spawned after Supervisor::new so the thread inherits the blocked signal
+    // mask and every signal keeps reaching the supervisor's signalfd.
+    std::thread::spawn(snapshot_if_stuck);
     let exit = sup.run();
     info!("init", "{exit:?} requested");
     sup.shutdown();
@@ -80,6 +95,23 @@ fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
         Exit::Reboot => PowerAction::Reboot,
         Exit::Poweroff => PowerAction::Poweroff,
     })
+}
+
+static ENGINE_READY: AtomicBool = AtomicBool::new(false);
+
+/// If the engine is not up after a while, save the log anyway so a stuck
+/// boot (no network, failing daemon) can be diagnosed from the SD card.
+fn snapshot_if_stuck() {
+    let mut waited = 0;
+    for at in [90, 300] {
+        std::thread::sleep(Duration::from_secs(at - waited));
+        waited = at;
+        if ENGINE_READY.load(Ordering::Relaxed) {
+            return;
+        }
+        warn!("init", "engine not ready after {at} s");
+        status::save_boot_log(&format!("engine not ready after {at} s"));
+    }
 }
 
 fn early_mounts() -> Result<()> {
@@ -127,6 +159,7 @@ fn finish(action: PowerAction) -> ! {
         warn!("init", "{e}");
     }
     let _ = sys::umount_lazy(paths::DATA_DIR);
+    status::save_boot_log(&format!("{action:?}"));
     let _ = sys::umount_lazy(paths::BOOT_DIR);
     sys::sync();
     info!("init", "{action:?}");
@@ -143,6 +176,8 @@ fn finish(action: PowerAction) -> ! {
 fn emergency(e: Error) -> ! {
     error!("init", "boot failed: {e}");
     error!("init", "rebooting in 60 s; fix /boot/pios.toml or the SD card");
+    status::led(Led::Error);
+    status::save_boot_log("boot failed");
     let until = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < until {
         let mut status = 0;

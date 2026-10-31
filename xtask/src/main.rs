@@ -190,10 +190,17 @@ impl Xtask {
 
     fn build(&self) -> Result {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        // mimalloc-sys links -latomic on ARM, which zig does not ship. ARMv7
+        // has native atomics (ldrex/strex), so an empty archive satisfies it.
+        let shim = self.work.join("zig-shim");
+        sh(&format!("mkdir -p '{d}' && [ -f '{d}/libatomic.a' ] || ar rc '{d}/libatomic.a'", d = shim.display()))?;
+        let flags = format!("target.{TARGET}.rustflags=[\"-L\",\"native={}\"]", shim.display());
         run(Command::new("cargo")
             .current_dir(&self.root)
             .env("PIOS_BUILD_EPOCH", epoch.to_string())
-            .args(["zigbuild", "--release", "--target", TARGET, "-p", "pios", "--features", "mimalloc"]))
+            // --config must follow the subcommand to reach cargo-zigbuild.
+            .args(["zigbuild", "--config", &flags])
+            .args(["--release", "--target", TARGET, "-p", "pios", "--features", "mimalloc"]))
     }
 
     fn pios_binary(&self) -> PathBuf {
@@ -268,8 +275,8 @@ impl Xtask {
         let apkroot = self.work.join("alpine-root");
         sh(&format!(
             "rm -rf '{r}' && mkdir -p '{r}' && \
-             fr=; [ \"$(id -u)\" = 0 ] || fr=fakeroot; \
-             $fr apk.static --root '{r}' --arch {arch} --initdb --no-scripts --no-cache --no-interactive \
+             um=; [ \"$(id -u)\" = 0 ] || um=--usermode; \
+             apk.static $um --root '{r}' --arch {arch} --initdb --no-scripts --no-cache --no-interactive \
                --keys-dir /opt/apk-keys/{arch} -X {mirror}/{ver}/main add {pkgs} && \
              rm -rf '{r}/lib/apk' '{r}/etc/apk' '{r}/var' '{r}/usr/share/man' '{r}/usr/share/doc'",
             r = apkroot.display(),
@@ -379,8 +386,11 @@ impl Xtask {
     fn qemu(&self) -> Result {
         let images = self.out.join("images");
         let cmdline = std::fs::read_to_string(self.root.join("board/rpi2/cmdline.txt")).map_err(|e| e.to_string())?;
-        // QEMU's raspi2b has no USB Ethernet chip; netd picks the usb-net device instead.
-        let cmdline = cmdline.trim().replace("console=serial0,115200", "console=ttyAMA0,115200");
+        // QEMU raspi2b: no smsc95xx (netd picks the usb-net device) and the
+        // dwc_otg FIQ fast path hangs the emulated CPUs, so disable it here only.
+        // Drop the HDMI console so /dev/console (init output) is the terminal.
+        let cmdline = cmdline.trim().replace("console=serial0,115200", "console=ttyAMA0,115200").replace(" console=tty1", "")
+            + " dwc_otg.fiq_enable=0 dwc_otg.fiq_fsm_enable=0";
         sh(&format!(
             r#"
             i='{images}'

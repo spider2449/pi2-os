@@ -71,7 +71,7 @@ struct Unit {
     log: Ring,
     out: Option<OwnedFd>,
     cgroup: Option<Cgroup>,
-    milestone: Option<String>,
+    on_ready: Option<Box<dyn FnOnce()>>,
 }
 
 pub struct Supervisor {
@@ -116,16 +116,16 @@ impl Supervisor {
                 failures: 0,
                 log: Ring::new(LOG_RING_BYTES),
                 out: None,
-                milestone: None,
+                on_ready: None,
             })
             .collect();
         Ok(Self { units, order, sigfd, ctl, console_logs, exit: None })
     }
 
-    /// Print `message` on the console the first time `service` becomes ready.
-    pub fn milestone(&mut self, service: &str, message: &str) {
+    /// Run `hook` once, the first time `service` becomes ready.
+    pub fn on_ready(&mut self, service: &str, hook: Box<dyn FnOnce()>) {
         if let Some(u) = self.units.iter_mut().find(|u| u.spec.name == service) {
-            u.milestone = Some(message.to_string());
+            u.on_ready = Some(hook);
         }
     }
 
@@ -240,9 +240,8 @@ impl Supervisor {
     fn mark_ready(&mut self, i: usize, started: Instant) {
         let u = &mut self.units[i];
         info!("supervisor", "{} ready ({} ms)", u.spec.name, started.elapsed().as_millis());
-        if let Some(msg) = u.milestone.take() {
-            // Plain line so test harnesses can match it on the serial console.
-            eprintln!("{msg}");
+        if let Some(hook) = u.on_ready.take() {
+            hook();
         }
     }
 
