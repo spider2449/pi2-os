@@ -85,9 +85,13 @@ fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
                 // Plain line so humans and test harnesses can spot it.
                 pios_core::log::line(pios_core::log::Level::Info, "pios: engine ready");
                 status::led(Led::Ready);
+                commit_trial();
                 status::save_boot_log("engine ready");
             }),
         );
+    } else {
+        // No engine to wait for: reaching the supervisor is success enough.
+        commit_trial();
     }
     // Spawned after Supervisor::new so the thread inherits the blocked signal
     // mask and every signal keeps reaching the supervisor's signalfd.
@@ -97,17 +101,35 @@ fn boot(select_engine: &EngineSelector) -> Result<PowerAction> {
     sup.shutdown();
     Ok(match exit {
         Exit::Reboot => PowerAction::Reboot,
+        Exit::TryReboot => PowerAction::TryReboot,
         Exit::Poweroff => PowerAction::Poweroff,
     })
 }
 
 static ENGINE_READY: AtomicBool = AtomicBool::new(false);
 
+/// Seconds a trial boot gets to bring the engine up before rolling back.
+const TRIAL_DEADLINE: u64 = 600;
+
+fn commit_trial() {
+    match pios_update::commit_if_trial() {
+        Ok(_) => {}
+        // The trial stays uncommitted; the next reboot returns to the old slot.
+        Err(e) => error!("init", "committing the update failed: {e}"),
+    }
+}
+
 /// If the engine is not up after a while, save the log anyway so a stuck
-/// boot (no network, failing daemon) can be diagnosed from the SD card.
+/// boot (no network, failing daemon) can be diagnosed from the SD card. A
+/// trial boot that never gets there is rolled back by a normal reboot: the
+/// firmware then reads config.txt and boots the previous slot.
 fn snapshot_if_stuck() {
+    let trial = pios_update::current_is_trial();
+    if trial {
+        info!("init", "trial boot: commit when the engine is ready, roll back after {TRIAL_DEADLINE} s");
+    }
     let mut waited = 0;
-    for at in [90, 300] {
+    for at in [90, 300, TRIAL_DEADLINE] {
         std::thread::sleep(Duration::from_secs(at - waited));
         waited = at;
         if ENGINE_READY.load(Ordering::Relaxed) {
@@ -115,6 +137,12 @@ fn snapshot_if_stuck() {
         }
         warn!("init", "engine not ready after {at} s");
         status::save_boot_log(&format!("engine not ready after {at} s"));
+        if trial && at == TRIAL_DEADLINE {
+            error!("init", "trial boot failed, rebooting into the previous system");
+            // SIGTERM to PID 1 takes the normal, orderly reboot path.
+            let _ = sys::kill(1, libc::SIGTERM);
+            return;
+        }
     }
 }
 

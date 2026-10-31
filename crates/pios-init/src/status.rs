@@ -4,12 +4,11 @@
 use std::sync::Mutex;
 
 use pios_core::sys::{self, write_attr};
-use pios_core::{paths, warn};
+use pios_core::warn;
 
 const LED: &str = "/sys/class/leds/ACT";
 pub const BOOT_LOG: &str = "/boot/pios-boot.log";
 const PREV_LOG: &str = "/boot/pios-boot.prev.log";
-const BOOT_FLAGS: libc::c_ulong = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Led {
@@ -45,27 +44,21 @@ static SAVE: Mutex<bool> = Mutex::new(false);
 pub fn save_boot_log(reason: &str) {
     let mut rotated = SAVE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(log) = read_kernel_log() else { return };
-    if let Err(e) = sys::mount("", paths::BOOT_DIR, "", libc::MS_REMOUNT | BOOT_FLAGS, "") {
-        warn!("status", "boot log: {e}");
-        return;
-    }
-    if !*rotated {
-        // Keep the previous boot's log once per boot.
-        let _ = std::fs::rename(BOOT_LOG, PREV_LOG);
-        *rotated = true;
-    }
     let text = format!("# PiOS boot log ({reason}, uptime {} s)\n{log}", sys::uptime_secs());
-    let result = std::fs::File::create(BOOT_LOG).and_then(|mut f| {
+    let result = sys::with_boot_writable(|| {
+        if !*rotated {
+            // Keep the previous boot's log once per boot.
+            let _ = std::fs::rename(BOOT_LOG, PREV_LOG);
+            *rotated = true;
+        }
+        let mut f = std::fs::File::create(BOOT_LOG)?;
         use std::io::Write;
         f.write_all(text.as_bytes())?;
-        f.sync_all()
+        f.sync_all()?;
+        Ok(())
     });
     if let Err(e) = result {
         warn!("status", "boot log: {e}");
-    }
-    sys::sync();
-    if let Err(e) = sys::mount("", paths::BOOT_DIR, "", libc::MS_REMOUNT | libc::MS_RDONLY | BOOT_FLAGS, "") {
-        warn!("status", "boot partition left writable: {e}");
     }
 }
 

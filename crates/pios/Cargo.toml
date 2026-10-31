@@ -18,6 +18,7 @@ pios-core.workspace = true
 pios-init.workspace = true
 pios-net.workspace = true
 pios-ctl.workspace = true
+pios-update.workspace = true
 pios-engine-api.workspace = true
 pios-engine-docker = { workspace = true, optional = true }
 pios-engine-native = { workspace = true, optional = true }

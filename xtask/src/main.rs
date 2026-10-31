@@ -31,6 +31,7 @@ usage: cargo xtask <command>
   image        assemble out/images/pios.img
   all          everything above except certs, in order
   qemu         boot the image in qemu-system-arm -M raspi2b
+  deploy       A/B-update a running board over SSH (PIOS_HOST, default pios)
   test         run host unit tests
   shell        open a shell in the build container
 
@@ -163,6 +164,7 @@ impl Xtask {
                 self.image()
             }
             "qemu" => self.qemu(),
+            "deploy" => self.deploy(),
             "shell" => run(&mut Command::new("bash")),
             _ => Err(format!("unknown command '{cmd}'\n{USAGE}")),
         }
@@ -406,6 +408,40 @@ impl Xtask {
             boot_mib = BOOT_MIB,
             data_mib = DATA_MIB,
             work = self.work.display(),
+        ))
+    }
+
+    /// Stream out/rootfs.squashfs to a running board, which writes it to its
+    /// inactive slot and reboots into it once (firmware tryboot). The board
+    /// commits the update when its engine comes up, or rolls back.
+    fn deploy(&self) -> Result {
+        let host = std::env::var("PIOS_HOST").unwrap_or_else(|_| "pios".into());
+        let image = self.out.join("rootfs.squashfs");
+        if !image.exists() {
+            return Err(format!("{} missing; run 'cargo xtask rootfs'", image.display()));
+        }
+        sh(&format!(
+            r#"
+            img='{img}'; host='{host}'
+            sum=$(sha256sum "$img" | cut -d' ' -f1)
+            echo "deploying $(du -h "$img" | cut -f1) rootfs (sha256 ${{sum:0:16}}...) to $host"
+            ssh "$host" pios update status
+            # 255 = the connection dropped because the board started rebooting.
+            rc=0; ssh "$host" pios update apply --sha256 "$sum" --reboot - < "$img" || rc=$?
+            [ $rc -eq 0 ] || [ $rc -eq 255 ] || exit $rc
+            echo "waiting for $host to come back from the trial boot..."
+            sleep 20; start=$(date +%s)
+            until ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; do
+              sleep 5; [ $(( $(date +%s) - start )) -lt 900 ] || {{ echo "board unreachable after 15 min"; exit 1; }}
+            done
+            # The trial commits once the engine is ready (or rolls back).
+            for _ in $(seq 180); do
+              s=$(ssh "$host" pios update status)
+              case "$s" in *"not committed"*) sleep 5 ;; *) break ;; esac
+            done
+            echo "$s"
+            "#,
+            img = image.display(),
         ))
     }
 

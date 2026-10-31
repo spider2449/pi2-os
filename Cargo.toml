@@ -11,6 +11,7 @@ members = [
     "crates/pios-engine-docker",
     "crates/pios-engine-native",
     "crates/pios-ctl",
+    "crates/pios-update",
     "crates/pios",
     "xtask",
 ]
@@ -33,6 +34,7 @@ pios-engine-api = { path = "crates/pios-engine-api" }
 pios-engine-docker = { path = "crates/pios-engine-docker" }
 pios-engine-native = { path = "crates/pios-engine-native" }
 pios-ctl = { path = "crates/pios-ctl" }
+pios-update = { path = "crates/pios-update" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }

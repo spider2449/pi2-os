@@ -12,6 +12,8 @@ pub enum Request {
     Stop { service: String },
     Restart { service: String },
     Reboot,
+    /// Reboot once into the armed A/B trial (firmware tryboot).
+    TryReboot,
     Poweroff,
 }
 

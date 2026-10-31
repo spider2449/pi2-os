@@ -13,3 +13,4 @@ pios-storage.workspace = true
 pios-tune.workspace = true
 pios-engine-api.workspace = true
 libc.workspace = true
+pios-update.workspace = true

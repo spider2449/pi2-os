@@ -67,16 +67,57 @@ pub fn sync() {
 #[derive(Debug, Clone, Copy)]
 pub enum PowerAction {
     Reboot,
+    /// Reboot with the Raspberry Pi firmware's one-shot tryboot flag: the next
+    /// boot reads tryboot.txt instead of config.txt, the one after is normal.
+    TryReboot,
     Poweroff,
 }
 
 pub fn reboot(action: PowerAction) -> Result<()> {
-    let cmd = match action {
-        PowerAction::Reboot => libc::RB_AUTOBOOT,
-        PowerAction::Poweroff => libc::RB_POWER_OFF,
+    let ret = match action {
+        PowerAction::Reboot => unsafe { libc::reboot(libc::RB_AUTOBOOT) },
+        PowerAction::Poweroff => unsafe { libc::reboot(libc::RB_POWER_OFF) },
+        // The rpi firmware driver looks for " tryboot" in the restart command.
+        // SAFETY: valid magic numbers and a NUL-terminated argument string.
+        PowerAction::TryReboot => unsafe {
+            libc::syscall(
+                libc::SYS_reboot,
+                libc::LINUX_REBOOT_MAGIC1,
+                libc::LINUX_REBOOT_MAGIC2,
+                libc::LINUX_REBOOT_CMD_RESTART2,
+                c"0 tryboot".as_ptr(),
+            ) as libc::c_int
+        },
     };
-    // SAFETY: plain syscall.
-    check(unsafe { libc::reboot(cmd) }).ctx(|| "reboot".into())
+    check(ret).ctx(|| format!("reboot ({action:?})"))
+}
+
+static BOOT_RW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with the FAT boot partition writable, then make it read-only
+/// again. Serialised so concurrent writers never remount under each other.
+pub fn with_boot_writable<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = BOOT_RW.lock().unwrap_or_else(|e| e.into_inner());
+    let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    mount("", crate::paths::BOOT_DIR, "", libc::MS_REMOUNT | flags, "")?;
+    let result = f();
+    sync();
+    let ro = mount("", crate::paths::BOOT_DIR, "", libc::MS_REMOUNT | libc::MS_RDONLY | flags, "");
+    match (result, ro) {
+        (Ok(v), Ok(())) => Ok(v),
+        (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+    }
+}
+
+/// Replace a file on the boot partition via a temporary file and rename, so
+/// a power cut leaves either the old or the new content (FAT permitting).
+pub fn write_boot_file(name: &str, content: &str) -> Result<()> {
+    let path = Path::new(crate::paths::BOOT_DIR).join(name);
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp).ctx(|| format!("create {}", tmp.display()))?;
+    std::io::Write::write_all(&mut f, content.as_bytes()).ctx(|| format!("write {}", tmp.display()))?;
+    f.sync_all().ctx(|| format!("fsync {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).ctx(|| format!("rename {}", path.display()))
 }
 
 pub fn swapon(path: &str, priority: i32) -> Result<()> {

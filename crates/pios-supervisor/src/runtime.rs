@@ -23,6 +23,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Reboot,
+    TryReboot,
     Poweroff,
 }
 
@@ -427,6 +428,10 @@ impl Supervisor {
             },
             Request::Stop { service } => self.request_stop(&service, false),
             Request::Restart { service } => self.request_stop(&service, true),
+            Request::TryReboot => {
+                self.exit = Some(Exit::TryReboot);
+                Response::Ok
+            }
             Request::Reboot => {
                 self.exit = Some(Exit::Reboot);
                 Response::Ok

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remote PiOS management over mutual TLS (works even when dockerd is down).
 #
-#   tools/pios-remote [-H host[:port]] <status|logs SVC|start SVC|stop SVC|restart SVC|reboot|poweroff>
+#   tools/pios-remote [-H host[:port]] <status|logs SVC|start SVC|stop SVC|restart SVC|reboot|tryboot|poweroff>
 #
 # Certificates default to ~/.docker/pios (ca.pem, cert.pem, key.pem), the
 # same client certificates used for the docker context.
@@ -15,6 +15,7 @@ if [ "${1:-}" = "-H" ]; then host="$2"; shift 2; fi
 cmd="${1:-}"; svc="${2:-}"
 case "$cmd" in
     status|reboot|poweroff) req="{\"cmd\":\"$cmd\"}" ;;
+    tryboot) req="{\"cmd\":\"try_reboot\"}" ;;
     logs|start|stop|restart)
         [ -n "$svc" ] || { echo "usage: $0 $cmd SERVICE" >&2; exit 2; }
         req="{\"cmd\":\"$cmd\",\"service\":\"$svc\"}" ;;

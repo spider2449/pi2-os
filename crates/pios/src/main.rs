@@ -21,6 +21,7 @@ fn main() {
         "netd" => daemon("netd", pios_net::netd::run),
         "ntpd" => daemon("ntpd", pios_net::ntpd::run),
         "ctld" => daemon("ctld", pios_ctl::server::run),
+        "update" => update(rest),
         #[cfg(feature = "engine-docker")]
         "engine-stop" => report("engine", pios_engine_docker::api::stop_all_containers()),
         "version" => {
@@ -28,7 +29,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: pios <init|netd|ntpd|ctld|ctl|engine-stop|version>");
+            eprintln!("usage: pios <init|netd|ntpd|ctld|ctl|update|engine-stop|version>");
             2
         }
     });
@@ -43,6 +44,50 @@ fn select_engine(kind: pios_core::config::EngineKind) -> Option<Box<dyn pios_eng
         #[cfg(feature = "engine-native")]
         EngineKind::Native => Some(Box::new(pios_engine_native::NativeEngine)),
         _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const UPDATE_USAGE: &str = "usage: pios update status\n       pios update apply [--sha256 HEX] [--reboot] <FILE|->";
+
+/// `pios update`: A/B rootfs updates (see the pios-update crate).
+#[cfg(target_os = "linux")]
+fn update(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("status") => match pios_update::status() {
+            Ok(s) => {
+                print!("{s}");
+                0
+            }
+            Err(e) => report("update", Err(e)),
+        },
+        Some("apply") => {
+            let mut opts = pios_update::ApplyOptions { sha256: None, reboot: false };
+            let mut source = None;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--sha256" => opts.sha256 = it.next().cloned(),
+                    "--reboot" => opts.reboot = true,
+                    _ => source = Some(a.clone()),
+                }
+            }
+            let result = match source.as_deref() {
+                Some("-") => pios_update::apply(&mut std::io::stdin().lock(), &opts),
+                Some(path) => std::fs::File::open(path)
+                    .map_err(|e| pios_core::Error::msg(format!("{path}: {e}")))
+                    .and_then(|mut f| pios_update::apply(&mut f, &opts)),
+                None => {
+                    eprintln!("{UPDATE_USAGE}");
+                    return 2;
+                }
+            };
+            report("update", result)
+        }
+        _ => {
+            eprintln!("{UPDATE_USAGE}");
+            2
+        }
     }
 }
 

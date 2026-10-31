@@ -23,7 +23,8 @@ GPU firmware (start_cd.elf)
 | `pios-engine-api` | `ContainerEngine` trait —— init 只認得這個介面 |
 | `pios-engine-docker` | daemon.json 生成、containerd/dockerd 服務、關機時優雅停止容器 |
 | `pios-engine-native` | Rust-native 引擎（youki）的預留位置 |
-| `pios-ctl` | `pios-ctl status / mem / logs / restart / reboot`；`ctld` 以 mTLS 對外提供同一套協定 |
+| `pios-ctl` | `pios-ctl status / mem / logs / restart / reboot / tryboot`；`ctld` 以 mTLS 對外提供同一套協定 |
+| `pios-update` | A/B rootfs 更新：寫入閒置分割區、firmware tryboot、引擎就緒後 commit，失敗自動回滾 |
 | `pios` | multi-call binary，以 cargo feature 選擇要編入哪些引擎 |
 
 所有模組在原始碼層獨立、可單獨測試；執行時合併成一個 binary，程式碼只在 page cache 中存在一份。
@@ -74,7 +75,15 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 | SSH（dropbear，選用） | 22 | 只允許金鑰登入；`[ssh] enabled = true` |
 | HDMI console / `pios-boot.log` / ACT LED | — | 開機與錯誤診斷，不需要網路 |
 
-不重燒 SD 卡的更新（手動 A/B）：把新的 `out/rootfs.squashfs` 寫入閒置的 root 分割區（p2/p3），再把 `cmdline.txt` 的 `root=` 指過去並重開機；Docker 資料在 p4，不受影響。開不了機時，在 PC 上把 `cmdline.txt` 改回原分割區即可。
+### 系統更新（A/B，不需重燒 SD 卡）
+
+```sh
+cargo xtask rootfs && cargo xtask deploy     # PIOS_HOST 預設為 pios
+```
+
+`deploy` 透過 SSH 把 rootfs 串流給 Pi 上的 `pios update apply`：寫入閒置的 root 分割區（p2↔p3）並以 sha256 回讀驗證，再用 firmware 的一次性 **tryboot** 旗標重開機到新系統。新系統在引擎就緒後自己 commit（把 `cmdline.txt` 永久指過去）；在那之前的任何失敗——kernel panic、init 崩潰、10 分鐘內引擎沒起來——都會以一般重開機收場，firmware 便讀回 `config.txt`，回到舊系統。Docker 資料在 p4，不受影響。實機量測：整個流程約 1 分鐘；刻意部署壞掉的映像檔，約 40 秒後自動回到舊系統。
+
+在 Pi 上：`pios update status` 查看兩個分割區的狀態。目前只更新 rootfs；kernel 與 firmware 位於共用的 boot 分割區，仍需重燒。
 
 ## 效能相關設計
 
@@ -97,11 +106,11 @@ root 唯讀，斷電不會損壞系統；所有寫入都集中在 p4。
 
 ## 狀態與後續
 
-已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH。
+已完成：Phase 0–3（建置系統、開機到 Rust init、系統服務、Docker 引擎）、無頭診斷、遠端管理、SSH、A/B 更新與自動回滾。
 
 實機（Pi 2 v1.1）量測：kernel 啟動到 `pios: engine ready` 約 19–22 s；整機記憶體使用約 57 MB，PiOS 自身約 3 MB；
 `docker run --rm alpine true` 約 3 s，主要是 dockerd（Go）本身的 CPU 時間。
 
 WSL2 建置：`bash build/setup-wsl.sh` 一次，之後 `cargo xtask all`。
 
-後續：自動化 A/B OTA（`pios-update`，含開機失敗自動回滾）、Rust-native 引擎（大幅降低 `docker run` 延遲與約 120 MB 記憶體）。
+後續：kernel/firmware 的安全更新、Rust-native 引擎（大幅降低 `docker run` 延遲與約 120 MB 記憶體）。

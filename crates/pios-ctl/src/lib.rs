@@ -6,7 +6,7 @@ pub mod server;
 
 use pios_core::ipc::{Request, Response};
 
-pub const USAGE: &str = "usage: pios-ctl <status|mem|logs SERVICE|start SERVICE|stop SERVICE|restart SERVICE|reboot|poweroff>";
+pub const USAGE: &str = "usage: pios-ctl <status|mem|logs SERVICE|start SERVICE|stop SERVICE|restart SERVICE|reboot|tryboot|poweroff>";
 
 /// Parse command line arguments (without argv[0]) into a request.
 /// `mem` is served by `status` plus local /proc reads.
@@ -19,6 +19,7 @@ pub fn parse_args(args: &[String]) -> Option<Request> {
         "stop" => Request::Stop { service: svc()? },
         "restart" => Request::Restart { service: svc()? },
         "reboot" => Request::Reboot,
+        "tryboot" => Request::TryReboot,
         "poweroff" => Request::Poweroff,
         _ => return None,
     })
