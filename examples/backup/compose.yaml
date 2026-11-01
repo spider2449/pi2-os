@@ -21,7 +21,7 @@
 #        rclone config                       # e.g. remote name "gdrive", type drive
 #   2. Start the stack once so the config volume exists, then load the config:
 #        docker --context pi compose -f examples/backup/compose.yaml up -d
-#        docker --context pi run --rm -i -v backup_config:/cfg alpine \
+#        docker --context pi run --rm -i -v backup_backup_config:/cfg alpine \
 #            sh -c 'cat > /cfg/rclone.conf && chmod 600 /cfg/rclone.conf' \
 #            < "$(rclone config file | tail -n1)"
 #        docker --context pi compose -f examples/backup/compose.yaml restart backup
