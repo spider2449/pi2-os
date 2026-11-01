@@ -233,7 +233,7 @@ GPU firmware（`bootcode.bin`、`start_cd.elf`、`fixup_cd.dat`）是共用的�
 
 ### Native 引擎（`[engine] kind = "native"`）
 
-`pios engined` 是單一 Rust daemon，在 `/var/run/docker.sock` 與 2376（mTLS，同一組憑證）上提供 docker CLI 日常需要的 Docker Engine API 子集：`run`（含 `-d`、`-it`、`--rm`、`-p`、`-v`、`-e`、`-w`、`-u`、`--restart`、`--memory`、`--cpus`、`--pids-limit`、`--cap-add/--cap-drop`、`--privileged`、`--device`、`--network host|none`、`--init`）、`ps`、`logs -f`、`exec -it`、`stop`/`kill`/`restart`/`rm`、`pull`/`images`/`rmi`、`volume`、`network`、`inspect`，以及 `docker compose`（實機以 `examples/gitea` 測試過 `up -d`、`ps`、`logs`、`down -v`、`depends_on: service_completed_successfully`）。image 直接從 registry pull（token 認證、linux/arm/v7 選擇、逐層 sha256 驗證），容器由 `pios container-init` 啟動：namespaces、overlayfs、pivot_root、Docker 預設 capability 集合、cgroup v2 限制；預設 seccomp 過濾（同 Docker：keyring、bpf、io_uring、userfaultfd、建立 user namespace 等，依 capability 放行）；bridge 網路 `pios0`（172.17.0.0/16）、使用者自訂網路（172.18–31.0.0/16，含以容器名稱/compose service 名稱解析的內建 DNS）與 iptables NAT/port 轉發。沒有 containerd、shim、runc，也沒有每個容器一個 Go 行程。
+`pios engined` 是單一 Rust daemon，在 `/var/run/docker.sock` 與 2376（mTLS，同一組憑證）上提供 docker CLI 日常需要的 Docker Engine API 子集：`run`（含 `-d`、`-it`、`--rm`、`-p`、`-v`、`-e`、`-w`、`-u`、`--restart`、`--memory`、`--cpus`、`--pids-limit`、`--cap-add/--cap-drop`、`--privileged`、`--device`、`--network host|none`、`--init`）、`ps`、`logs -f`、`exec -it`、`stop`/`kill`/`restart`/`rm`、`pull`/`images`/`rmi`、`volume`、`network`、`inspect`、`top`、`stats`、`cp`（執行中與已停止的容器都行，含 volume 與 bind mount；往容器複製單次上限 16 MiB）、`events`（`--since`、`--filter`）、`system df`、`image prune`（`-a`、`--filter until=`）與 `volume prune`（`-a`），以及 `docker compose`（實機以 `examples/gitea` 測試過 `up -d`、`ps`、`logs`、`down -v`、`depends_on: service_completed_successfully`）。image 直接從 registry pull（token 認證、linux/arm/v7 選擇、逐層 sha256 驗證），容器由 `pios container-init` 啟動：namespaces、overlayfs、pivot_root、Docker 預設 capability 集合、cgroup v2 限制；預設 seccomp 過濾（同 Docker：keyring、bpf、io_uring、userfaultfd、建立 user namespace 等，依 capability 放行）；bridge 網路 `pios0`（172.17.0.0/16）、使用者自訂網路（172.18–31.0.0/16，含以容器名稱/compose service 名稱解析的內建 DNS）與 iptables NAT/port 轉發。沒有 containerd、shim、runc，也沒有每個容器一個 Go 行程。
 
 實機（Pi 2 v1.1）量測，與 Docker 引擎對照：`docker run --rm alpine true` 0.53 s（dockerd 2.25 s）；整機記憶體 29 MB（59 MB）；engined RSS 約 5 MB（dockerd + containerd 約 113 MB），每個執行中的容器另有約 1.7 MB 的 helper（大多為共用頁面）；開機後 5 s 引擎就緒。
 
@@ -262,6 +262,7 @@ docker --context pi compose -f examples/gitea/compose.yaml restart server
 - Docker：`overlay2`、`log-driver: local`（有大小上限）、`userland-proxy: false`、`live-restore`。
 - TLS 用 Ed25519：Go 在 32 位元 ARM 上做 RSA 很慢，RSA-2048 每次握手要花 dockerd 約 230 ms CPU。
 - 記憶體：zram（lz4）swap 吸收 image pull 的尖峰，不寫 SD 卡。
+- SD 卡磨損與容量：`/var`、`/tmp`、`/run` 都是 tmpfs，系統日誌只在記憶體；資料分割區以 `noatime,commit=60` 掛載；容器日誌每個容器最多 `log_max_size`（預設 10m）× `log_max_file`（預設 3）。image 與 volume 用 `docker image prune -a`、`docker volume prune -a`（只刪沒有容器使用的）清理，`docker system df` 看用量。
 - 時鐘：Pi 沒有 RTC；開機時以 build 時間與上次儲存的時間為下限，dockerd 預設等 NTP 同步後才啟動（避免 TLS 失敗）。
 
 評估過但未採用（實機量測）：crun 取代 runc（在這塊板子上反而較慢，且不支援 `--pid=host`）、`GOGC` 調整（差異約 6%）。

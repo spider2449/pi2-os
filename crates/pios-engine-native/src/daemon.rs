@@ -12,7 +12,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -35,6 +35,9 @@ use crate::state::*;
 use crate::store::{write_atomic, Store};
 use crate::util::{now_ns, random_id, random_name, rfc3339, signal_number};
 use crate::DOCKER_SOCKET;
+
+mod extras;
+use extras::{EventBus, PullGuard};
 
 /// API error: HTTP status and message (`{"message": ...}`).
 #[derive(Debug)]
@@ -168,6 +171,9 @@ pub struct Daemon {
     shutting_down: AtomicBool,
     log_max: u64,
     log_files: u32,
+    events: Mutex<EventBus>,
+    /// Pulls in progress (layer garbage collection waits for them).
+    pulls: AtomicUsize,
 }
 
 impl Daemon {
@@ -347,6 +353,7 @@ impl Daemon {
         ctr.save(&c);
         self.containers.lock().unwrap().insert(id.clone(), ctr);
         info!("engine", "created {} ({})", &id[..12], c.name);
+        self.emit_container(&c, "create", &[]);
         Ok((201, json!({"Id": id, "Warnings": []})))
     }
 
@@ -506,6 +513,7 @@ impl Daemon {
         c.state = State { status: Status::Running, pid: spawned.pid, started_at: now_ns(), ..State::default() };
         ctr.save(&c);
         info!("engine", "started {} ({}) pid {}", &id[..12], c.name, spawned.pid);
+        self.emit_container(&c, "start", &[]);
         let runtime::Spawned { child, io, .. } = spawned;
         {
             let mut live = ctr.live();
@@ -575,6 +583,7 @@ impl Daemon {
             ctr.exits.fetch_add(1, Ordering::SeqCst);
             ctr.cv.notify_all();
             info!("engine", "{} ({}) exited with {code}", c.short_id(), c.name);
+            self.emit_container(&c, "die", &[("exitCode", code.to_string())]);
             (c.id.clone(), c.request.host_config.auto_remove, restart, c.state.started_at)
         };
         if self.shutting_down.load(Ordering::SeqCst) {
@@ -649,6 +658,7 @@ impl Daemon {
             let _ = self.signal(ctr, libc::SIGKILL);
             ctr.wait_until(Duration::from_secs(10), exited);
         }
+        self.emit_container(&ctr.lock(), "stop", &[]);
         Ok(true)
     }
 
@@ -683,6 +693,7 @@ impl Daemon {
         self.containers.lock().unwrap().remove(&c.id);
         ctr.cv.notify_all();
         info!("engine", "removed {} ({})", c.short_id(), c.name);
+        self.emit_container(&c, "destroy", &[]);
         Ok(())
     }
 
@@ -867,6 +878,25 @@ impl Daemon {
                 list.sort_by_key(|(t, _)| -t);
                 ok(Value::Array(list.into_iter().map(|(_, v)| v).collect()))
             }
+            ("GET", ["events"]) => {
+                self.events(req, w)?;
+                Err(ApiError(0, String::new()))
+            }
+            ("GET", ["system", "df"]) => ok(self.disk_usage()),
+            ("POST", ["images", "prune"]) => ok(self.prune_images(req)?),
+            ("POST", ["volumes", "prune"]) => ok(self.prune_volumes(req)?),
+            ("GET", ["containers", id, "stats"]) => {
+                let c = self.find(id)?;
+                self.stats(&c, req, w)
+            }
+            ("GET", ["containers", id, "top"]) => {
+                let c = self.find(id)?;
+                ok(self.top(&c)?)
+            }
+            ("HEAD" | "GET" | "PUT", ["containers", id, "archive"]) => {
+                let c = self.find(id)?;
+                self.archive(&c, req, w)
+            }
             ("POST", ["containers", "create"]) => self.create(req).map(Some),
             ("POST", ["containers", "prune"]) => {
                 let mut deleted = Vec::new();
@@ -909,6 +939,7 @@ impl Daemon {
                 let t = req.query("t").and_then(|t| t.parse().ok());
                 self.stop(&c, t, None)?;
                 self.start(&c)?;
+                self.emit_container(&c.lock(), "restart", &[]);
                 Ok(Some((204, Value::Null)))
             }
             ("POST", ["containers", id, "kill"]) => {
@@ -923,6 +954,7 @@ impl Daemon {
                     c.save(&g);
                 }
                 self.signal(&c, sig)?;
+                self.emit_container(&c.lock(), "kill", &[("signal", sig.to_string())]);
                 Ok(Some((204, Value::Null)))
             }
             ("POST", ["containers", id, "wait"]) => {
@@ -964,8 +996,9 @@ impl Daemon {
                     return Err(ApiError(409, format!("Conflict. The container name \"/{name}\" is already in use")));
                 }
                 let mut g = c.lock();
-                g.name = name;
+                let old = std::mem::replace(&mut g.name, name);
                 c.save(&g);
+                self.emit_container(&g, "rename", &[("oldName", format!("/{old}"))]);
                 Ok(Some((204, Value::Null)))
             }
             ("DELETE", ["containers", id]) => {
@@ -1009,6 +1042,13 @@ impl Daemon {
                     let m = e.to_string();
                     ApiError(if m.starts_with("No such image") { 404 } else { 409 }, m)
                 })?;
+                for e in &r {
+                    for (key, action) in [("Untagged", "untag"), ("Deleted", "delete")] {
+                        if let Some(n) = e[key].as_str() {
+                            self.emit("image", action, n, json!({"name": n}));
+                        }
+                    }
+                }
                 ok(Value::Array(r))
             }
             ("GET", ["networks"]) => {
@@ -1033,10 +1073,15 @@ impl Daemon {
             ("POST", ["networks", "create"]) => {
                 let body: NetworkCreate = serde_json::from_slice(&req.body).map_err(|e| bad_request(format!("invalid network request: {e}")))?;
                 let n = self.create_network(&body)?;
+                self.emit("network", "create", &n.id, json!({"name": n.name, "type": "bridge"}));
                 Ok(Some((201, json!({"Id": n.id, "Warning": ""}))))
             }
             ("DELETE", ["networks", key]) => {
+                let named = self.find_network(key);
                 self.remove_network(key)?;
+                if let Some(n) = named {
+                    self.emit("network", "destroy", &n.id, json!({"name": n.name, "type": "bridge"}));
+                }
                 Ok(Some((204, Value::Null)))
             }
             ("POST", ["networks", "prune"]) => {
@@ -1097,6 +1142,9 @@ impl Daemon {
                         write_atomic(&self.volumes_dir().join(&name).join("labels.json"), &serde_json::to_vec(&l).expect("json"))?;
                     }
                 }
+                if fresh {
+                    self.emit("volume", "create", &name, json!({"driver": "local"}));
+                }
                 Ok(Some((201, self.volume_json(&name))))
             }
             ("GET", ["volumes", name]) => {
@@ -1120,6 +1168,7 @@ impl Daemon {
                     return Err(ApiError(404, format!("get {name}: no such volume")));
                 }
                 fs::remove_dir_all(self.volumes_dir().join(name))?;
+                self.emit("volume", "destroy", name, json!({"driver": "local"}));
                 Ok(Some((204, Value::Null)))
             }
             _ => Err(ApiError(
@@ -1201,6 +1250,7 @@ impl Daemon {
         }
         let client = self.client.as_ref().ok_or_else(|| ApiError(500, "registry client unavailable (CA certificates missing)".into()))?;
         let auth = req.header("x-registry-auth").and_then(Auth::from_header);
+        let _pulling = PullGuard::new(&self.pulls);
         http::respond_chunked(w, 200, "application/json")?;
         let writer = Mutex::new(w.try_clone()?);
         let mut emit = |v: Value| {
@@ -1211,6 +1261,8 @@ impl Daemon {
         if let Err(e) = registry::pull(client, &self.store, &r, auth, self.cfg.max_concurrent_downloads as usize, &mut emit) {
             warn!("engine", "pull {r}: {e}");
             emit(json!({"errorDetail": {"message": e.to_string()}, "error": e.to_string()}));
+        } else {
+            self.emit("image", "pull", &name, json!({"name": name}));
         }
         let _ = writer.lock().unwrap().write_all(b"0\r\n\r\n");
         Ok(())
@@ -1547,7 +1599,8 @@ impl Daemon {
                     if code >= 500 {
                         warn!("engine", "{} {}: {msg}", req.method, req.path);
                     }
-                    respond(&mut w, code, "application/json", json!({"message": msg}).to_string().as_bytes(), close)
+                    let body = json!({"message": msg}).to_string();
+                    respond(&mut w, code, "application/json", if head { b"" } else { body.as_bytes() }, close)
                 }
             };
             if sent.is_err() || close {
@@ -1814,6 +1867,8 @@ pub fn run(cfg: &PiosConfig) -> Result<()> {
         shutting_down: AtomicBool::new(false),
         log_max: logs::parse_size(&cfg.engine.log_max_size).unwrap_or(10 << 20),
         log_files: cfg.engine.log_max_file.max(1),
+        events: Mutex::new(EventBus::default()),
+        pulls: AtomicUsize::new(0),
     });
     let nets: Vec<Network> = fs::read(daemon.networks_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     for n in &nets {
