@@ -1,0 +1,113 @@
+# Daily Gitea backup to the cloud (rclone), running on the Pi itself.
+#
+# PiOS has no cron daemon, no docker CLI and a read-only rootfs, so the
+# scheduler is a small always-on container (alpine + rclone) that sleeps until
+# the configured hour, then:
+#
+#   1. takes a consistent SQLite snapshot with `sqlite3 .backup`
+#      (Gitea keeps running, no downtime),
+#   2. streams a tar.gz of the rest of the volume straight to the remote
+#      (nothing is staged on the SD card),
+#   3. deletes remote backups older than KEEP_DAYS.
+#
+# The gitea_data volume is mounted read-only. Remote layout:
+#   <REMOTE>/<YYYY-MM-DD_HHMMSS>/gitea.db
+#   <REMOTE>/<YYYY-MM-DD_HHMMSS>/files.tar.gz   (repos, app.ini, avatars, ...)
+# The Gitea binary (bin/) and logs are excluded; init re-downloads the binary.
+#
+# One-time setup:
+#
+#   1. Create the rclone remote on the PC (opens a browser for OAuth):
+#        rclone config                       # e.g. remote name "gdrive", type drive
+#   2. Start the stack once so the config volume exists, then load the config:
+#        docker --context pi compose -f examples/backup/compose.yaml up -d
+#        docker --context pi run --rm -i -v backup_config:/cfg alpine \
+#            sh -c 'cat > /cfg/rclone.conf && chmod 600 /cfg/rclone.conf' \
+#            < "$(rclone config file | tail -n1)"
+#        docker --context pi compose -f examples/backup/compose.yaml restart backup
+#   3. Check it works right away instead of waiting for the schedule:
+#        BACKUP_ON_START=1 docker --context pi compose -f examples/backup/compose.yaml up -d --force-recreate
+#        docker --context pi logs -f backup_backup_1
+#
+# Settings (environment variables for `compose up`):
+#   REMOTE          rclone destination, default "gdrive:pios-backup"
+#   BACKUP_HOUR_UTC hour of day (0-23, UTC) to run, default 19 (= 03:00 UTC+8)
+#   KEEP_DAYS       remote retention, default 30
+#   BACKUP_ON_START 1 = also run once immediately after start
+#
+# The gitea stack must already exist (this file uses its gitea_data volume).
+
+name: backup
+
+services:
+  backup:
+    image: alpine:3.22
+    environment:
+      REMOTE: ${REMOTE:-gdrive:pios-backup}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-19}
+      KEEP_DAYS: ${KEEP_DAYS:-30}
+      BACKUP_ON_START: ${BACKUP_ON_START:-0}
+      RCLONE_CONFIG: /cfg/rclone.conf
+    volumes:
+      - gitea_data:/data:ro
+      - backup_config:/cfg
+    mem_limit: 160m
+    restart: unless-stopped
+    command:
+      - sh
+      - -uc
+      - |
+        # Retry until the network and the package mirror are reachable.
+        until apk add --no-cache rclone sqlite; do
+          echo "apk add failed, retrying in 30s"; sleep 30
+        done
+
+        run_backup() {
+          stamp=$$(date -u +%Y-%m-%d_%H%M%S)
+          dest="$$REMOTE/$$stamp"
+          echo "backup $$stamp: start"
+
+          if [ ! -f "$$RCLONE_CONFIG" ]; then
+            echo "backup $$stamp: missing $$RCLONE_CONFIG (see setup in compose.yaml)"
+            return 1
+          fi
+
+          # Consistent snapshot of the live database.
+          snap=/tmp/gitea.db
+          rm -f "$$snap"
+          sqlite3 /data/gitea/gitea.db ".backup '$$snap'" || return 1
+          rclone rcat "$$dest/gitea.db" < "$$snap" || return 1
+          rm -f "$$snap"
+
+          # Everything else, streamed; the live db files are left out.
+          tar -C /data -czf - \
+              --exclude=./bin \
+              --exclude=./gitea/log \
+              --exclude=./gitea/gitea.db \
+              --exclude=./gitea/gitea.db-wal \
+              --exclude=./gitea/gitea.db-shm \
+              . | rclone rcat "$$dest/files.tar.gz" || return 1
+
+          # Retention: drop old backups, then their empty directories.
+          rclone delete "$$REMOTE" --min-age "$${KEEP_DAYS}d" --rmdirs || true
+          echo "backup $$stamp: done"
+        }
+
+        [ "$$BACKUP_ON_START" = 1 ] && { run_backup || echo "backup failed"; }
+
+        while :; do
+          # Seconds until the next BACKUP_HOUR_UTC:00:00.
+          now=$$(( $$(date -u +%H | sed 's/^0*//; s/^$/0/') * 3600 \
+                 + $$(date -u +%M | sed 's/^0*//; s/^$/0/') * 60 \
+                 + $$(date -u +%S | sed 's/^0*//; s/^$/0/') ))
+          wait=$$(( ($$BACKUP_HOUR_UTC * 3600 - now + 86400) % 86400 ))
+          [ "$$wait" -lt 60 ] && wait=$$((wait + 86400))
+          echo "next backup in $${wait}s"
+          sleep "$$wait"
+          run_backup || echo "backup failed, will retry at the next slot"
+        done
+
+volumes:
+  gitea_data:
+    external: true
+  backup_config:

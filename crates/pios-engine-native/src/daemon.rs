@@ -827,7 +827,11 @@ impl Daemon {
             let r = NetRef { name: name.into(), id: name.into(), gateway: GATEWAY, subnet: SUBNET, prefix: PREFIX, bridge: if name == "bridge" { network::BRIDGE.into() } else { String::new() } };
             out.push((self.network_json(&r, &BTreeMap::new(), 0, false), BTreeMap::new(), name.to_string(), name.to_string()));
         }
-        for n in self.networks.lock().unwrap().clone() {
+        // Copy first so the lock is released before the loop: network_json() takes
+        // it again via find_network(), and a `for` over the guard temporary would
+        // keep it held for the whole loop (self-deadlock).
+        let user_nets = self.networks.lock().unwrap().clone();
+        for n in user_nets {
             let r = NetRef { name: n.name.clone(), id: n.id.clone(), gateway: n.gateway, subnet: n.subnet, prefix: n.prefix, bridge: n.bridge.clone() };
             out.push((self.network_json(&r, &n.labels, n.created, n.internal), n.labels.clone(), n.name, n.id));
         }
