@@ -284,3 +284,9 @@ docker --context pi compose -f examples/gitea/compose.yaml restart server
 WSL2 建置：`bash build/setup-wsl.sh` 一次，之後 `cargo xtask all`。
 
 後續：firmware 更新的回滾保護（需要硬體 watchdog 在 firmware 階段介入）。
+
+## 授權
+
+以 [MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE) 雙授權，由你擇一。
+
+打包進映像的第三方元件（Linux kernel、Docker、busybox、Alpine 套件、GPU firmware）各自遵循其原授權。
