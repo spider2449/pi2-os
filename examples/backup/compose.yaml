@@ -15,22 +15,24 @@
 #   <REMOTE>/<YYYY-MM-DD_HHMMSS>/files.tar.gz   (repos, app.ini, avatars, ...)
 # The Gitea binary (bin/) and logs are excluded; init re-downloads the binary.
 #
-# One-time setup:
+# One-time setup (Backblaze B2, no OAuth and no config file):
 #
-#   1. Create the rclone remote on the PC (opens a browser for OAuth):
-#        rclone config                       # e.g. remote name "gdrive", type drive
-#   2. Start the stack once so the config volume exists, then load the config:
+#   1. Create a B2 account, a private bucket, and an application key limited to
+#      that bucket (Read and Write). Note the keyID and the applicationKey.
+#   2. Start the stack with the credentials in your shell (they are not stored in
+#      this repo; they end up only in the container environment on the Pi):
+#        export B2_ACCOUNT=<keyID> B2_KEY=<applicationKey> REMOTE=:b2:<bucket>/pios
 #        docker --context pi compose -f examples/backup/compose.yaml up -d
-#        docker --context pi run --rm -i -v backup_backup_config:/cfg alpine \
-#            sh -c 'cat > /cfg/rclone.conf && chmod 600 /cfg/rclone.conf' \
-#            < "$(rclone config file | tail -n1)"
-#        docker --context pi compose -f examples/backup/compose.yaml restart backup
-#   3. Check it works right away instead of waiting for the schedule:
+#   3. Test right away instead of waiting for the schedule:
 #        BACKUP_ON_START=1 docker --context pi compose -f examples/backup/compose.yaml up -d --force-recreate
-#        docker --context pi logs -f backup_backup_1
+#        docker --context pi logs -f backup-backup-1
+#
+# Any other rclone backend works too: add its RCLONE_<REMOTE>_* variables to the
+# environment block below and point REMOTE at it.
 #
 # Settings (environment variables for `compose up`):
-#   REMOTE          rclone destination, default "gdrive:pios-backup"
+#   REMOTE          rclone destination, e.g. ":b2:<bucket>/pios" (required)
+#   B2_ACCOUNT / B2_KEY  Backblaze keyID and applicationKey
 #   BACKUP_HOUR_UTC hour of day (0-23, UTC) to run, default 19 (= 03:00 UTC+8)
 #   KEEP_DAYS       remote retention, default 30
 #   BACKUP_ON_START 1 = also run once immediately after start
@@ -43,14 +45,14 @@ services:
   backup:
     image: alpine:3.22
     environment:
-      REMOTE: ${REMOTE:-gdrive:pios-backup}
+      REMOTE: ${REMOTE:?set REMOTE, e.g. :b2:mybucket/pios}
+      RCLONE_B2_ACCOUNT: ${B2_ACCOUNT:-}
+      RCLONE_B2_KEY: ${B2_KEY:-}
       BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-19}
       KEEP_DAYS: ${KEEP_DAYS:-30}
       BACKUP_ON_START: ${BACKUP_ON_START:-0}
-      RCLONE_CONFIG: /cfg/rclone.conf
     volumes:
       - gitea_data:/data:ro
-      - backup_config:/cfg
     mem_limit: 160m
     restart: unless-stopped
     command:
@@ -67,10 +69,6 @@ services:
           dest="$$REMOTE/$$stamp"
           echo "backup $$stamp: start"
 
-          if [ ! -f "$$RCLONE_CONFIG" ]; then
-            echo "backup $$stamp: missing $$RCLONE_CONFIG (see setup in compose.yaml)"
-            return 1
-          fi
 
           # Consistent snapshot of the live database.
           snap=/tmp/gitea.db
@@ -110,4 +108,3 @@ services:
 volumes:
   gitea_data:
     external: true
-  backup_config:

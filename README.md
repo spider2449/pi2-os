@@ -252,7 +252,7 @@ docker --context pi compose -f examples/gitea/compose.yaml restart server
 
 這個 stack 直接跑 Gitea 執行檔，沒有官方 image 那個把 `GITEA__section__KEY` 環境變數轉寫進 `app.ini` 的啟動腳本，所以設定最好直接寫在 `app.ini`。
 
-**定期雲端備份（`examples/backup`）**：板子沒有 cron，所以用一個常駐容器（alpine + rclone）在板子上排程。每天指定時間（預設 03:00 UTC+8）用 `sqlite3 .backup` 取得一致的資料庫快照（Gitea 不用停機），再把 volume 其餘內容（repo、`app.ini`，不含執行檔與 log）串流 tar.gz 到 rclone remote，不佔 SD 卡空間，並刪除超過 `KEEP_DAYS`（預設 30）天的舊備份。第一次要在 PC 上 `rclone config` 建好 remote（例如 `gdrive`），再把 `rclone.conf` 灌進 `backup_backup_config` volume；步驟與可調參數都寫在 `examples/backup/compose.yaml` 開頭。還原時下載 `gitea.db` 與 `files.tar.gz`，解到新的 `gitea_data`（見〈換新 SD 卡重裝〉的還原步驟），並把 `gitea.db` 放回 `/data/gitea/gitea.db`。
+**定期雲端備份（`examples/backup`）**：板子沒有 cron，所以用一個常駐容器（alpine + rclone）在板子上排程。每天指定時間（預設 03:00 UTC+8）用 `sqlite3 .backup` 取得一致的資料庫快照（Gitea 不用停機），再把 volume 其餘內容（repo、`app.ini`，不含執行檔與 log）串流 tar.gz 到 rclone remote，不佔 SD 卡空間，並刪除超過 `KEEP_DAYS`（預設 30）天的舊備份。用 Backblaze B2（免 OAuth、免設定檔）：建好 bucket 與 application key 後，用環境變數 `B2_ACCOUNT`、`B2_KEY`、`REMOTE=:b2:<bucket>/pios` 執行 `compose up -d`；步驟與可調參數都寫在 `examples/backup/compose.yaml` 開頭。還原時下載 `gitea.db` 與 `files.tar.gz`，解到新的 `gitea_data`（見〈換新 SD 卡重裝〉的還原步驟），並把 `gitea.db` 放回 `/data/gitea/gitea.db`。
 
 ## 效能相關設計
 
