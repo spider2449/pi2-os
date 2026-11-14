@@ -1,8 +1,8 @@
-# Daily Gitea backup to the cloud (rclone), running on the Pi itself.
+# Weekly Gitea backup to the cloud (rclone), running on the Pi itself.
 #
 # PiOS has no cron daemon, no docker CLI and a read-only rootfs, so the
 # scheduler is a small always-on container (alpine + rclone) that sleeps until
-# the configured hour, then:
+# the configured weekday and hour (default Sunday 03:00 UTC+8), then:
 #
 #   1. takes a consistent SQLite snapshot with `sqlite3 .backup`
 #      (Gitea keeps running, no downtime),
@@ -33,7 +33,9 @@
 # Settings (environment variables for `compose up`):
 #   REMOTE          rclone destination, e.g. ":b2:<bucket>/pios" (required)
 #   B2_ACCOUNT / B2_KEY  Backblaze keyID and applicationKey
-#   BACKUP_HOUR_UTC hour of day (0-23, UTC) to run, default 19 (= 03:00 UTC+8)
+#   BACKUP_WEEKDAY_UTC day of week (0=Sun .. 6=Sat, UTC) to run, default 6
+#   BACKUP_HOUR_UTC hour of day (0-23, UTC) to run, default 19
+#                   (Sat 19:00 UTC = Sun 03:00 UTC+8)
 #   KEEP_DAYS       remote retention, default 30
 #   BACKUP_ON_START 1 = also run once immediately after start
 #
@@ -48,6 +50,7 @@ services:
       REMOTE: ${REMOTE:?set REMOTE, e.g. :b2:mybucket/pios}
       RCLONE_B2_ACCOUNT: ${B2_ACCOUNT:-}
       RCLONE_B2_KEY: ${B2_KEY:-}
+      BACKUP_WEEKDAY_UTC: ${BACKUP_WEEKDAY_UTC:-6}
       BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-19}
       KEEP_DAYS: ${KEEP_DAYS:-30}
       BACKUP_ON_START: ${BACKUP_ON_START:-0}
@@ -94,12 +97,15 @@ services:
         [ "$$BACKUP_ON_START" = 1 ] && { run_backup || echo "backup failed"; }
 
         while :; do
-          # Seconds until the next BACKUP_HOUR_UTC:00:00.
-          now=$$(( $$(date -u +%H | sed 's/^0*//; s/^$/0/') * 3600 \
+          # Seconds until the next BACKUP_WEEKDAY_UTC, BACKUP_HOUR_UTC:00:00.
+          week=604800
+          now=$$(( $$(date -u +%w) * 86400 \
+                 + $$(date -u +%H | sed 's/^0*//; s/^$/0/') * 3600 \
                  + $$(date -u +%M | sed 's/^0*//; s/^$/0/') * 60 \
                  + $$(date -u +%S | sed 's/^0*//; s/^$/0/') ))
-          wait=$$(( ($$BACKUP_HOUR_UTC * 3600 - now + 86400) % 86400 ))
-          [ "$$wait" -lt 60 ] && wait=$$((wait + 86400))
+          target=$$(( $$BACKUP_WEEKDAY_UTC * 86400 + $$BACKUP_HOUR_UTC * 3600 ))
+          wait=$$(( (target - now + week) % week ))
+          [ "$$wait" -lt 60 ] && wait=$$((wait + week))
           echo "next backup in $${wait}s"
           sleep "$$wait"
           run_backup || echo "backup failed, will retry at the next slot"
