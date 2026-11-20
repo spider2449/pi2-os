@@ -3,3 +3,5 @@
 /work
 /board/rpi2/pios.local.toml
 /board/rpi2/authorized_keys
+.bklist/
+examples/gitea-sync/.env

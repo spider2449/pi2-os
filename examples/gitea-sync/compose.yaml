@@ -1,0 +1,233 @@
+# Periodic GitHub -> Gitea mirror sync, running on the Pi itself.
+#
+# PiOS has no cron daemon and no docker CLI on the board, so the scheduler is a
+# small always-on container (alpine + curl + jq) that sleeps until the configured
+# weekday and hour (default Sunday 03:00 UTC+8), then, for every repository in
+# REPOS:
+#
+#   1. creates it as a Gitea mirror with the migrate API if it is missing, or
+#   2. refreshes the mirror credentials and asks Gitea to sync it.
+#
+# Gitea does the actual fetch, so nothing is duplicated on the SD card and the
+# mirror status is visible in the Gitea web UI. The destination name is the
+# source owner and repository joined by a dash:
+#
+#   spider2449/rgl  ->  spider/spider2449-rgl
+#
+# One-time setup:
+#
+#   1. Start the gitea stack first; this stack joins its network
+#      (gitea_default). The Gitea user (GITEA_OWNER, default "spider") must
+#      already exist.
+#   2. Create a Gitea token with the write:repository scope
+#      (Settings -> Applications) for that user.
+#   3. For private GitHub repositories create a fine-grained token with
+#      Contents: Read (or a classic token with the repo scope). Public
+#      repositories work without it.
+#   4. Copy examples/gitea-sync/.env.example to examples/gitea-sync/.env and
+#      fill in the tokens (the file is gitignored), then start the stack:
+#
+#        docker --context pi compose --env-file examples/gitea-sync/.env \
+#          -f examples/gitea-sync/compose.yaml up -d
+#
+#   5. Test right away instead of waiting for the schedule:
+#        SYNC_ON_START=1 docker --context pi compose \
+#          --env-file examples/gitea-sync/.env \
+#          -f examples/gitea-sync/compose.yaml up -d --force-recreate
+#        docker --context pi logs -f gitea-sync-sync-1
+#
+# Settings (environment variables for `compose up`):
+#   GITEA_TOKEN     Gitea API token with write:repository (required)
+#   GITEA_URL       Gitea base URL, default http://server:3000 (the gitea
+#                   stack's service name on the shared network)
+#   GITEA_OWNER     Gitea user that owns the mirrors, default "spider"
+#   GITHUB_TOKEN    GitHub PAT used to clone private repositories
+#   GITHUB_USERNAME username paired with GITHUB_TOKEN, default x-access-token
+#   MIRROR_INTERVAL Gitea's own mirror interval, default 168h (weekly)
+#   SYNC_WEEKDAY_UTC day of week (0=Sun .. 6=Sat, UTC) to run, default 6
+#   SYNC_HOUR_UTC   hour of day (0-23, UTC) to run, default 19
+#                   (Sat 19:00 UTC = Sun 03:00 UTC+8)
+#   SYNC_ON_START   1 = also run once immediately after start
+#   REPOS           one repository per line:
+#                     <github owner>/<repo> <gitea repo> [private]
+#                   The destination defaults to <owner>-<repo>; add "private"
+#                   to create a new mirror as a private Gitea repository.
+#
+# Tokens end up in the container environment and, for mirrors, in the Gitea
+# remote configuration (visible with `docker inspect`). Use dedicated tokens
+# and rotate them with `up -d --force-recreate`; the job then patches the
+# existing mirrors with the new credentials.
+#
+# An existing repository that is not a mirror is left untouched (the job only
+# logs a warning), so manually created repositories are never deleted or
+# overwritten.
+
+name: gitea-sync
+
+services:
+  sync:
+    image: alpine:3.22
+    environment:
+      GITEA_URL: ${GITEA_URL:-http://server:3000}
+      GITEA_OWNER: ${GITEA_OWNER:-spider}
+      GITEA_TOKEN: ${GITEA_TOKEN:?set GITEA_TOKEN in examples/gitea-sync/.env}
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-x-access-token}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      MIRROR_INTERVAL: ${MIRROR_INTERVAL:-168h}
+      SYNC_WEEKDAY_UTC: ${SYNC_WEEKDAY_UTC:-6}
+      SYNC_HOUR_UTC: ${SYNC_HOUR_UTC:-19}
+      SYNC_ON_START: ${SYNC_ON_START:-0}
+      REPOS: |
+        spider2449/rgl spider2449-rgl
+        spider2449/rust-agent-harness spider2449-rust-agent-harness
+        spider2449/rnk spider2449-rnk
+        spider2449/mibox spider2449-mibox
+        spider2449/git-tools spider2449-git-tools
+        spider2449/image-viewer spider2449-image-viewer
+        spider2449/pi2-os spider2449-pi2-os
+        spider2449/amazing-a32-os spider2449-amazing-a32-os
+        spider2449/kimodo-maya spider2449-kimodo-maya
+        spider2449/cloudcode spider2449-cloudcode
+        spider2449/video-thumb spider2449-video-thumb
+        spider2449/kimodo-houdini spider2449-kimodo-houdini
+        spider2449/houdini-hip spider2449-houdini-hip
+        spider2449/subtitle-fps-converter spider2449-subtitle-fps-converter
+        spider2449/dashboard-system spider2449-dashboard-system
+    networks:
+      - gitea
+    mem_limit: 64m
+    restart: unless-stopped
+    command:
+      - sh
+      - -uc
+      - |
+        # Retry until the network and the package mirror are reachable.
+        until apk add --no-cache curl jq; do
+          echo "apk add failed, retrying in 30s"; sleep 30
+        done
+
+        api() {
+          method=$$1 path=$$2 data=$${3:-}
+          if [ -n "$$data" ]; then
+            curl -fsS -X "$$method" \
+              -H "Authorization: token $$GITEA_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data "$$data" "$$GITEA_URL/api/v1$$path"
+          else
+            curl -fsS -X "$$method" \
+              -H "Authorization: token $$GITEA_TOKEN" \
+              "$$GITEA_URL/api/v1$$path"
+          fi
+        }
+
+        echo "waiting for $$GITEA_URL"
+        until curl -fsS "$$GITEA_URL/api/v1/version" >/dev/null 2>&1; do
+          echo "gitea not ready, retrying in 10s"; sleep 10
+        done
+        echo "gitea ready"
+
+        printf '%s\n' "$$REPOS" > /tmp/repos.txt
+
+        sync_once() {
+          succeeded=0
+          failed=0
+          [ -n "$$GITHUB_TOKEN" ] && echo "github token: set" || echo "github token: not set"
+
+          while read -r src dest visibility _; do
+            case "$$src" in ''|\#*) continue ;; esac
+            [ -n "$$dest" ] || dest=$$(printf '%s' "$$src" | tr '/' '-')
+            private=false
+            [ "$$visibility" = private ] && private=true
+
+            tmp=/tmp/repo.json
+            code=$$(curl -sS -o "$$tmp" -w '%{http_code}' \
+              -H "Authorization: token $$GITEA_TOKEN" \
+              "$$GITEA_URL/api/v1/repos/$$GITEA_OWNER/$$dest") || code=000
+
+            case "$$code" in
+              404)
+                if [ -n "$$GITHUB_TOKEN" ]; then
+                  payload=$$(jq -n \
+                    --arg clone "https://github.com/$$src.git" \
+                    --arg name "$$dest" \
+                    --arg owner "$$GITEA_OWNER" \
+                    --arg interval "$$MIRROR_INTERVAL" \
+                    --arg user "$$GITHUB_USERNAME" \
+                    --arg pass "$$GITHUB_TOKEN" \
+                    --argjson private "$$private" \
+                    '{clone_addr:$$clone, repo_name:$$name, repo_owner:$$owner,
+                      mirror:true, mirror_interval:$$interval, private:$$private,
+                      auth_username:$$user, auth_password:$$pass}')
+                else
+                  payload=$$(jq -n \
+                    --arg clone "https://github.com/$$src.git" \
+                    --arg name "$$dest" \
+                    --arg owner "$$GITEA_OWNER" \
+                    --arg interval "$$MIRROR_INTERVAL" \
+                    --argjson private "$$private" \
+                    '{clone_addr:$$clone, repo_name:$$name, repo_owner:$$owner,
+                      mirror:true, mirror_interval:$$interval, private:$$private}')
+                fi
+                if api POST /repos/migrate "$$payload" >/dev/null; then
+                  echo "created $$GITEA_OWNER/$$dest from $$src"
+                  succeeded=$$((succeeded + 1))
+                else
+                  echo "FAILED to create $$GITEA_OWNER/$$dest from $$src"
+                  failed=$$((failed + 1))
+                fi
+                ;;
+              200)
+                if [ "$$(jq -r '.mirror' "$$tmp" 2>/dev/null)" != true ]; then
+                  echo "WARN $$GITEA_OWNER/$$dest exists but is not a mirror, skipping"
+                  failed=$$((failed + 1))
+                  continue
+                fi
+                if [ -n "$$GITHUB_TOKEN" ]; then
+                  payload=$$(jq -n \
+                    --arg user "$$GITHUB_USERNAME" \
+                    --arg token "$$GITHUB_TOKEN" \
+                    --arg interval "$$MIRROR_INTERVAL" \
+                    '{mirror_username:$$user, mirror_token:$$token, mirror_interval:$$interval}')
+                  api PATCH "/repos/$$GITEA_OWNER/$$dest" "$$payload" >/dev/null \
+                    || echo "WARN could not update credentials for $$GITEA_OWNER/$$dest"
+                fi
+                if api POST "/repos/$$GITEA_OWNER/$$dest/mirror-sync" >/dev/null; then
+                  echo "queued sync $$GITEA_OWNER/$$dest"
+                  succeeded=$$((succeeded + 1))
+                else
+                  echo "FAILED to queue sync for $$GITEA_OWNER/$$dest"
+                  failed=$$((failed + 1))
+                fi
+                ;;
+              *)
+                echo "FAILED to inspect $$GITEA_OWNER/$$dest (HTTP $$code)"
+                failed=$$((failed + 1))
+                ;;
+            esac
+          done < /tmp/repos.txt
+
+          echo "sync done: $$succeeded ok, $$failed failed"
+          [ "$$failed" -eq 0 ]
+        }
+
+        [ "$$SYNC_ON_START" = 1 ] && sync_once
+
+        while :; do
+          # Seconds until the next SYNC_WEEKDAY_UTC, SYNC_HOUR_UTC:00:00.
+          week=604800
+          now=$$(( $$(date -u +%w) * 86400 \
+                 + $$(date -u +%H | sed 's/^0*//; s/^$$/0/') * 3600 \
+                 + $$(date -u +%M | sed 's/^0*//; s/^$$/0/') * 60 \
+                 + $$(date -u +%S | sed 's/^0*//; s/^$$/0/') ))
+          target=$$(( $$SYNC_WEEKDAY_UTC * 86400 + $$SYNC_HOUR_UTC * 3600 ))
+          wait=$$(( (target - now + week) % week ))
+          [ "$$wait" -lt 60 ] && wait=$$((wait + week))
+          echo "next sync in $${wait}s"
+          sleep "$$wait"
+          sync_once || echo "sync failed, will retry at the next slot"
+        done
+
+networks:
+  gitea:
+    external: true
+    name: gitea_default

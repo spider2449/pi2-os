@@ -254,6 +254,32 @@ docker --context pi compose -f examples/gitea/compose.yaml restart server
 
 **定期雲端備份（`examples/backup`）**：板子沒有 cron，所以用一個常駐容器（alpine + rclone）在板子上排程。每星期指定時間（預設星期日 03:00 UTC+8）用 `sqlite3 .backup` 取得一致的資料庫快照（Gitea 不用停機），再把 volume 其餘內容（repo、`app.ini`，不含執行檔與 log）串流 tar.gz 到 rclone remote，不佔 SD 卡空間，並刪除超過 `KEEP_DAYS`（預設 30）天的舊備份。用 Backblaze B2（免 OAuth、免設定檔）：建好 bucket 與 application key 後，用環境變數 `B2_ACCOUNT`、`B2_KEY`、`REMOTE=:b2:<bucket>/pios` 執行 `compose up -d`；步驟與可調參數都寫在 `examples/backup/compose.yaml` 開頭。還原時下載 `gitea.db` 與 `files.tar.gz`，解到新的 `gitea_data`（見〈換新 SD 卡重裝〉的還原步驟），並把 `gitea.db` 放回 `/data/gitea/gitea.db`。
 
+**GitHub 同步（`examples/gitea-sync`）**：把 GitHub 上的 repo 定期鏡像到板子上的 Gitea，命名規則是來源 owner 加 repo 名稱，例如 `spider2449/rgl` → `spider/spider2449-rgl`。同樣是常駐容器排程（alpine + curl + jq），預設每週日 03:00 UTC+8 透過 Gitea API 觸發 `mirror-sync`；第一次執行時若 Gitea 還沒有對應 repo，會用 migrate API 建立 mirror（`mirror_interval` 預設 168h，Gitea 自己也會每週同步一次），實際抓取由 Gitea 執行，不另外佔 SD 卡空間。
+
+1. 在 Gitea（Settings → Applications）建立有 `write:repository` 權限的 token；`spider` 使用者必須已存在。
+2. 複製 `examples/gitea-sync/.env.example` 為 `examples/gitea-sync/.env`（已 gitignore），填入 `GITEA_TOKEN`。有私有 GitHub repo 時再填 `GITHUB_TOKEN`（fine-grained token 給 `Contents: Read`，或 classic token 給 `repo`）；公開 repo 不需要。
+
+   ```powershell
+   Copy-Item examples/gitea-sync/.env.example examples/gitea-sync/.env
+   ```
+
+3. 先啟動 `examples/gitea`，再啟動同步工作（它會加入 Gitea 的 `gitea_default` 網路）：
+
+   ```sh
+   docker --context pi compose --env-file examples/gitea-sync/.env \
+     -f examples/gitea-sync/compose.yaml up -d
+   ```
+
+4. 想立刻同步一次而不等排程：
+
+   ```sh
+   SYNC_ON_START=1 docker --context pi compose --env-file examples/gitea-sync/.env \
+     -f examples/gitea-sync/compose.yaml up -d --force-recreate
+   docker --context pi logs -f gitea-sync-sync-1
+   ```
+
+清單在 `examples/gitea-sync/compose.yaml` 的 `REPOS`，一行一筆 `<GitHub owner>/<repo> <Gitea repo>`；來源是私有 repo 時在行尾加 `private`，新建的鏡像才會是 private（公開 repo 留空即可）。`GITEA_URL` 預設是 `http://server:3000`，`GITEA_OWNER` 預設 `spider`。token 會存在容器環境與 Gitea 的 mirror 遠端設定中（`docker inspect` 可見），請用可撤銷的專用 token；換 token 後用 `up -d --force-recreate` 重新啟動，工作會更新既有 mirror 的認證。已存在但不是 mirror 的 repo 只會記錄警告，不會被刪除或覆蓋。
+
 ## 效能相關設計
 
 - Rust：musl 靜態連結、fat LTO、`codegen-units=1`、`panic=abort`、`target-cpu=cortex-a7`、mimalloc。
