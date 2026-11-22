@@ -1,16 +1,16 @@
 # Periodic GitHub -> Gitea mirror sync, running on the Pi itself.
 #
 # PiOS has no cron daemon and no docker CLI on the board, so the scheduler is a
-# small always-on container (alpine + curl + jq) that sleeps until the configured
+# small always-on container (Alpine with curl, jq and Git) that sleeps until the configured
 # weekday and hour (default Sunday 03:00 UTC+8), then, for every repository in
 # REPOS:
 #
 #   1. creates it as a Gitea mirror with the migrate API if it is missing, or
-#   2. refreshes the mirror credentials and asks Gitea to sync it.
+#   2. refreshes the credentials and queues a sync for an existing mirror, or
+#   3. fetches GitHub branches and tags and pushes them to an existing regular repo.
 #
-# Gitea does the actual fetch, so nothing is duplicated on the SD card and the
-# mirror status is visible in the Gitea web UI. The destination name is the
-# source owner and repository joined by a dash:
+# Regular repo updates use temporary storage and preserve destination-only refs.
+# The destination name is the source owner and repository joined by a dash:
 #
 #   spider2449/rgl  ->  spider/spider2449-rgl
 #
@@ -58,9 +58,8 @@
 # and rotate them with `up -d --force-recreate`; the job then patches the
 # existing mirrors with the new credentials.
 #
-# An existing repository that is not a mirror is left untouched (the job only
-# logs a warning), so manually created repositories are never deleted or
-# overwritten.
+# Diverged branches and conflicting tags are rejected by Git. Other refs can
+# still update, and the repository is reported as failed if any push is rejected.
 
 name: gitea-sync
 
@@ -95,14 +94,14 @@ services:
         spider2449/dashboard-system spider2449-dashboard-system
     networks:
       - gitea
-    mem_limit: 64m
+    mem_limit: 192m
     restart: unless-stopped
     command:
       - sh
       - -uc
       - |
         # Retry until the network and the package mirror are reachable.
-        until apk add --no-cache curl jq; do
+        until apk add --no-cache curl jq git; do
           echo "apk add failed, retrying in 30s"; sleep 30
         done
 
@@ -127,6 +126,30 @@ services:
         echo "gitea ready"
 
         printf '%s\n' "$$REPOS" > /tmp/repos.txt
+
+        sync_regular_repo() (
+          src=$$1 dest=$$2
+          work=$$(mktemp -d) || exit 1
+          trap 'rm -rf "$$work"' EXIT
+          export GIT_TERMINAL_PROMPT=0
+          source_url="https://github.com/$$src.git"
+          if [ -n "$$GITHUB_TOKEN" ]; then
+            source_auth=$$(printf '%s:%s' "$$GITHUB_USERNAME" "$$GITHUB_TOKEN" | base64 | tr -d '\n')
+            set -- -c "http.extraHeader=Authorization: Basic $$source_auth"
+          else
+            set --
+          fi
+          git init -q --bare "$$work" || exit 1
+          git -C "$$work" -c pack.threads=1 -c http.lowSpeedLimit=1024 \
+            -c http.lowSpeedTime=120 "$$@" fetch --no-tags "$$source_url" \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' || exit 1
+
+          dest_auth=$$(printf '%s:%s' "$$GITEA_OWNER" "$$GITEA_TOKEN" | base64 | tr -d '\n')
+          git -C "$$work" -c "http.extraHeader=Authorization: Basic $$dest_auth" \
+            -c pack.threads=1 -c pack.windowMemory=8m push \
+            "$$GITEA_URL/$$GITEA_OWNER/$$dest.git" \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+        )
 
         sync_once() {
           succeeded=0
@@ -178,8 +201,13 @@ services:
                 ;;
               200)
                 if [ "$$(jq -r '.mirror' "$$tmp" 2>/dev/null)" != true ]; then
-                  echo "WARN $$GITEA_OWNER/$$dest exists but is not a mirror, skipping"
-                  failed=$$((failed + 1))
+                  if sync_regular_repo "$$src" "$$dest"; then
+                    echo "updated $$GITEA_OWNER/$$dest from $$src"
+                    succeeded=$$((succeeded + 1))
+                  else
+                    echo "FAILED to update $$GITEA_OWNER/$$dest from $$src"
+                    failed=$$((failed + 1))
+                  fi
                   continue
                 fi
                 if [ -n "$$GITHUB_TOKEN" ]; then
